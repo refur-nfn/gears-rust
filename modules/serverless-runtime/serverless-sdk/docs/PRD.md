@@ -427,7 +427,6 @@ for production async workloads.
   structured span emission per call (see DESIGN.md for rationale).
 - **Rationale**: The SDK is on the critical invocation path for all adapters; latency overhead
   accumulates across high-frequency workloads.
-- **Verification Method**: Manual review of per-invocation overhead before each release; no automated benchmark currently exists.
 
 #### Public API Documentation
 
@@ -647,7 +646,7 @@ There are no open questions at this time.
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Trait signature changes break downstream handlers | High — any `FunctionHandler` impl stops compiling | Keep crate at 0.x; communicate breaking changes via semver major bump |
+| Trait signature changes break downstream adapters | High — any `FunctionHandler` impl stops compiling | At 0.x, breaking changes may occur in minor releases (0.y → 0.y+1); after 1.0, breaking changes require a semver major bump. Changelog documents all signature changes. |
 | Engine-specific dep accidentally introduced via transitive pull | High — violates `cpt-cf-serverless-sdk-core-nfr-no-engine-deps` | Manual PR review; minimal dependency surface |
 | `async-trait` boxing overhead at cold-path invocations | Low — per-invocation allocation in already-async context | Acceptable trade-off for stable ergonomics; revisit when RPITIT Send bound stabilises fully |
 

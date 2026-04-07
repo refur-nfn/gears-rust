@@ -112,7 +112,7 @@ without requiring callers to annotate anything.
 |--------|-------------|--------------|-----------------|----------------------|
 | `cpt-cf-serverless-sdk-core-nfr-no-engine-deps` | No engine-specific deps | All modules | Dep list restricted to `serde`, `serde_json`, `thiserror`, `async-trait`, `tracing` | `cargo deny` in CI |
 | `cpt-cf-serverless-sdk-core-nfr-no-unsafe` | Zero `unsafe` blocks | All modules | Workspace `unsafe_code = "forbid"` lint; no pointer manipulation | Lint enforced at compile time |
-| `cpt-cf-serverless-sdk-core-nfr-low-overhead` | No blocking I/O or extra heap allocs on hot path | `trace.rs`, `handler.rs` | `call_instrumented` introduces one `Box<dyn Future>` (async-trait) and one `tracing` span; no additional heap allocations on the hot path | Criterion benchmark in CI |
+| `cpt-cf-serverless-sdk-core-nfr-low-overhead` | No blocking I/O or extra heap allocs on hot path | `trace.rs`, `handler.rs` | `call_instrumented` introduces one `Box<dyn Future>` (async-trait) and one `tracing` span; no additional heap allocations on the hot path | Code review on PRs touching `trace.rs` or `handler.rs` |
 | `cpt-cf-serverless-sdk-core-nfr-api-docs` | Zero missing-doc warnings; `#![deny(missing_docs)]` | All public items | All public types, traits, and functions documented with purpose, usage, and invariants | `cargo doc --no-deps` in CI |
 | `cpt-cf-serverless-sdk-core-nfr-authoring-ergonomics` | Plain `async fn` syntax; no lifetime annotations on handler impls | `handler.rs`, `workflow.rs` | `async-trait` expands `async fn` to `Pin<Box<dyn Future + Send>>` internally, keeping the `impl` surface annotation-free | SDK examples and integration tests compile with `async fn` syntax; CI fails on any explicit `impl Future` or lifetime annotation on method signatures |
 
@@ -313,8 +313,8 @@ All public types in this crate that may gain fields or variants in future semver
 releases are declared `#[non_exhaustive]`. The table below is the authoritative reference
 for which types carry this attribute and what it means for each consumer role.
 
-| Type | `#[non_exhaustive]` | Impact on adapter authors | Impact on adapter authors |
-|------|---------------------|--------------------------|--------------------------|
+| Type | `#[non_exhaustive]` | Impact on adapter authors | Construction / match pattern |
+|------|---------------------|--------------------------|------------------------------|
 | `ServerlessSdkError` | Yes (enum) | `match` must include a `_` catch-all arm | `match` must include a `_` catch-all arm; no compile-time signal exists for new variants — adapter maintainers must consult DESIGN.md §3.1 when updating the SDK dependency |
 | `CompensationInput` | Yes (struct) | Field access by name is stable; struct literal construction outside the crate is forbidden | Adapter constructs `CompensationInput` via `CompensationInput::new(trigger, original_workflow_invocation_id, failed_step_id, failed_step_error, workflow_state_snapshot, timestamp, function_id, original_input, tenant_id, correlation_id, started_at)` — a `pub fn new(...)` constructor defined in the crate |
 | `FailedStepError` | Yes (struct) | Field access by name is stable; struct literal construction outside the crate is forbidden | Constructed via `FailedStepError::new(error_type, message, error_metadata)` |
@@ -322,10 +322,11 @@ for which types carry this attribute and what it means for each consumer role.
 | `Context` | No | All 9 fields are stable; struct literal construction is used in tests | Adapter constructs `Context` via struct literal syntax; any field addition is a compile break at every adapter construction site — intentional, to force `InvocationRecord → Context` mapping updates |
 
 **Note on `Context`**: `Context` is not `#[non_exhaustive]` because adapters must
-construct it in struct literal form before calling handlers. If a new field is added to
-`Context`, adapter code that constructs it with `Context { field_a, field_b, .. }` will
-fail to compile, prompting the required update. This is the intended mechanism for
-keeping adapter-side `InvocationRecord → Context` mappings in sync.
+construct it in struct literal form before calling handlers. Adding or removing a field
+on `Context` is a compile-breaking change: every adapter site that constructs a `Context`
+struct literal must be updated to supply the new field (or remove the old one). This is
+intentional — it forces adapter-side `InvocationRecord → Context` mappings to stay in sync
+with the SDK at compile time.
 
 ### 3.2 Component Model
 
@@ -700,7 +701,7 @@ state across invocations. All SDK types are `Send + Sync`, compatible with paral
 |-------|----------|-------|
 | Unit | Per-module tests with HashMap-backed `Environment` mock and minimal `Context` | Trait compilation, error variant mapping, deadline helper behavior |
 | Integration | Compile-only test: `impl FunctionHandler` + `impl WorkflowHandler` without any adapter crate | Verifies API contract compiles on stable 1.92.0 |
-| Performance | Criterion benchmark for `call_instrumented` round-trip overhead | Verifies `nfr-low-overhead` threshold (one `Box<dyn Future>` + one span) |
+| Performance | Code review: verify `call_instrumented` introduces no blocking I/O or extra heap allocations | Verifies `nfr-low-overhead` threshold (one `Box<dyn Future>` + one span) |
 
 ### Database schemas & tables
 
