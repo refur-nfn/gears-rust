@@ -3,7 +3,9 @@ use futures::stream::{self, BoxStream, StreamExt};
 use uuid::Uuid;
 
 use crate::error::PluginError;
-use crate::models::{Capability, CapabilityValue, HealthStatus, Message, StreamingEvent};
+use crate::models::{
+    Capability, CapabilityValue, HealthStatus, Message, StreamingEvent, TenantId, UserId,
+};
 
 /// A boxed async stream of streaming events from a plugin.
 ///
@@ -55,9 +57,9 @@ pub struct PluginCallContext {
     /// in every log line emitted while handling the call.
     pub request_id: Uuid,
     /// Tenant that owns the session issuing the call.
-    pub tenant_id: String,
+    pub tenant_id: TenantId,
     /// End-user behind the call (opaque string from the auth token).
-    pub user_id: String,
+    pub user_id: UserId,
     /// GTS plugin instance ID that is handling the call (matches the bound
     /// `SessionType.plugin_instance_id`).
     pub plugin_instance_id: String,

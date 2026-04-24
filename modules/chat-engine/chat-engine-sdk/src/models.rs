@@ -2,6 +2,106 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+/// Tenant identifier. Opaque string from the auth token, used to scope all
+/// queries. Newtype distinguishes it from `UserId` at compile time so call
+/// sites cannot accidentally swap tenant and user arguments.
+///
+/// `#[serde(transparent)]` keeps the on-the-wire and DB JSON representation
+/// as a plain string, so this is a pure compile-time refinement.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TenantId(String);
+
+impl TenantId {
+    #[must_use]
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for TenantId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for TenantId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl AsRef<str> for TenantId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TenantId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// End-user identifier (opaque string from the auth token). Newtype
+/// distinguishes it from `TenantId` at compile time.
+///
+/// `#[serde(transparent)]` keeps the wire/DB representation as a plain string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserId(String);
+
+impl UserId {
+    #[must_use]
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for UserId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for UserId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl AsRef<str> for UserId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A chat session: the top-level container that groups a conversation's
 /// messages, tenant/user ownership, backend plugin binding, and lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,9 +109,9 @@ pub struct Session {
     /// Unique session identifier (primary key).
     pub session_id: Uuid,
     /// Tenant that owns the session; all queries are scoped by this value.
-    pub tenant_id: String,
+    pub tenant_id: TenantId,
     /// End-user who created the session (opaque string from the auth token).
-    pub user_id: String,
+    pub user_id: UserId,
     /// Optional client identifier (e.g., app/device) that initiated the session.
     pub client_id: Option<String>,
     /// Session type this session is bound to; determines which backend plugin
