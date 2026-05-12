@@ -119,6 +119,10 @@ fn serialize_context(err: &CanonicalError) -> Result<serde_json::Value, serde_js
     }
 }
 
+// `Problem.context` is `serde_json::Value`, so stringifying the serialization
+// error is the intended fallback here. The original CanonicalError is already
+// preserved in the other Problem fields.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<CanonicalError> for Problem {
     fn from(err: CanonicalError) -> Self {
         match Problem::from_error(&err) {

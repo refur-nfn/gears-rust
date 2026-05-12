@@ -71,6 +71,10 @@ impl std::fmt::Display for MutationError {
 
 impl std::error::Error for MutationError {}
 
+// TODO(DE1302): `MutationError::Internal.message` is a String, so the source
+// `EnforcerError` is dropped. Extend the variant to hold the source and remove
+// this allow.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<EnforcerError> for MutationError {
     #[allow(clippy::cognitive_complexity)]
     fn from(e: EnforcerError) -> Self {

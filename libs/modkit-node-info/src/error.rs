@@ -14,6 +14,7 @@ pub enum NodeInfoError {
     Internal(String),
 }
 
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<anyhow::Error> for NodeInfoError {
     fn from(e: anyhow::Error) -> Self {
         Self::Internal(e.to_string())

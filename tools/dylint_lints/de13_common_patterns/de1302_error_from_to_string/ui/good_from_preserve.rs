@@ -74,4 +74,33 @@ impl From<DatabaseError> for ContextError {
     }
 }
 
+// Good - UFCS ToString::to_string on a non-Error value must not be flagged.
+#[derive(Debug)]
+struct KeyedError {
+    key: String,
+    source: DatabaseError,
+}
+
+impl fmt::Display for KeyedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.key, self.source)
+    }
+}
+
+impl std::error::Error for KeyedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl From<DatabaseError> for KeyedError {
+    fn from(e: DatabaseError) -> Self {
+        let label: &str = "db";
+        KeyedError {
+            key: ToString::to_string(label), // UFCS on &str — not flagged
+            source: e,
+        }
+    }
+}
+
 fn main() {}

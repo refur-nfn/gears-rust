@@ -38,6 +38,10 @@ impl DomainError {
     }
 }
 
+// TODO(DE1302): `DomainError::Forbidden` and `DomainError::Internal` only carry
+// Strings, so the `EnforcerError` source is lost. Extend the variants to hold a
+// boxed source so `.source()` returns the original error, then remove this allow.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<authz_resolver_sdk::EnforcerError> for DomainError {
     fn from(e: authz_resolver_sdk::EnforcerError) -> Self {
         tracing::error!(error = %e, "AuthZ scope resolution failed");

@@ -1276,6 +1276,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "de1302_error_from_to_string"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "de1303_no_primitive_type_alias"
 version = "0.1.0"
 dependencies = [

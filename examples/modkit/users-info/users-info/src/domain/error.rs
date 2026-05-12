@@ -130,12 +130,17 @@ impl From<Box<dyn std::error::Error>> for DomainError {
     }
 }
 
+// TODO(DE1302): `DomainError::database(...)` only accepts a String, so these
+// From impls drop the source error. Extend `Database` to hold a boxed source
+// so `.source()` returns the original error, then remove these allows.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<DbError> for DomainError {
     fn from(e: DbError) -> Self {
         DomainError::database(e.to_string())
     }
 }
 
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<ScopeError> for DomainError {
     fn from(e: ScopeError) -> Self {
         DomainError::database(e.to_string())

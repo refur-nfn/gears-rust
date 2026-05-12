@@ -576,12 +576,18 @@ impl std::error::Error for CanonicalError {}
 // From impls for common library errors (? propagation)
 // ---------------------------------------------------------------------------
 
+// TODO(DE1302): `Internal` only carries a description string today, so these
+// From impls lose the source error chain. Refactor `Internal` to also carry a
+// boxed source so `.source()` returns the original error, then remove these
+// allows.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<std::io::Error> for CanonicalError {
     fn from(err: std::io::Error) -> Self {
         Self::__internal(Internal::new(err.to_string()))
     }
 }
 
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<serde_json::Error> for CanonicalError {
     fn from(err: serde_json::Error) -> Self {
         Self::__internal(Internal::new(err.to_string())).with_detail("Malformed JSON request body")
@@ -589,6 +595,7 @@ impl From<serde_json::Error> for CanonicalError {
 }
 
 #[cfg(feature = "sea-orm")]
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<sea_orm::DbErr> for CanonicalError {
     fn from(err: sea_orm::DbErr) -> Self {
         Self::__internal(Internal::new(err.to_string()))

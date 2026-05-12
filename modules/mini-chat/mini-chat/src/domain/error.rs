@@ -159,6 +159,10 @@ pub fn db_err(e: impl std::fmt::Display) -> DomainError {
     DomainError::database(e.to_string())
 }
 
+// TODO(DE1302): `DomainError::database(...)` only accepts a String, so the
+// source `DbError` is dropped. Extend `Database` to hold the source error and
+// remove this allow.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<DbError> for DomainError {
     fn from(e: DbError) -> Self {
         DomainError::database(e.to_string())
@@ -186,6 +190,10 @@ impl From<ScopeError> for DomainError {
     }
 }
 
+// TODO(DE1302): `DomainError::internal(...)` only accepts a String, so the
+// source `EnforcerError` is dropped. Extend the variant to hold the source and
+// remove this allow.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<authz_resolver_sdk::EnforcerError> for DomainError {
     #[allow(clippy::cognitive_complexity)]
     fn from(e: authz_resolver_sdk::EnforcerError) -> Self {

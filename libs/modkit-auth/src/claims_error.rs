@@ -49,7 +49,12 @@ pub enum ClaimsError {
     UnknownKeyId(String),
 }
 
-// Conversion from ClaimsError to AuthError for backward compatibility
+// Conversion from ClaimsError to AuthError for backward compatibility.
+// TODO(DE1302): `AuthError::ValidationFailed` only accepts a String, so the
+// remaining ClaimsError variants collapse via `.to_string()`. Introduce a
+// structured `ValidationFailed(Box<ClaimsError>)` (or `#[from]` variant) and
+// remove this allow once callers can match on the source.
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<ClaimsError> for crate::errors::AuthError {
     fn from(err: ClaimsError) -> Self {
         match err {

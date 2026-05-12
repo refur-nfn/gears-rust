@@ -1,8 +1,8 @@
 error: `.to_string()` in `From`/`TryFrom` impl destroys the error chain (DE1302)
-  --> $DIR/bad_from_to_string.rs:30:18
+  --> $DIR/bad_ufcs_to_string.rs:30:18
    |
-LL |         AppError(e.to_string())
-   |                  ^^^^^^^^^^^^^
+LL |         AppError(ToString::to_string(&e))
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: store the source error directly, use an enum variant, or use `#[from]` with thiserror
    = note: `.to_string()` discards the original error type: `.source()` returns None and the error cannot be downcast

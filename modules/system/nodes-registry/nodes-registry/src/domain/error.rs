@@ -20,6 +20,7 @@ pub enum DomainError {
     Internal(String),
 }
 
+#[allow(unknown_lints, de1302_error_from_to_string)]
 impl From<anyhow::Error> for DomainError {
     fn from(e: anyhow::Error) -> Self {
         Self::Internal(e.to_string())
