@@ -352,8 +352,13 @@ impl OpenApiRegistryImpl {
             .description(info.description.clone())
             .build();
 
-        let servers = (!info.servers.is_empty())
-            .then(|| info.servers.iter().cloned().map(Server::new).collect::<Vec<_>>());
+        let servers = (!info.servers.is_empty()).then(|| {
+            info.servers
+                .iter()
+                .cloned()
+                .map(Server::new)
+                .collect::<Vec<_>>()
+        });
 
         let openapi = OpenApiBuilder::new()
             .info(openapi_info)

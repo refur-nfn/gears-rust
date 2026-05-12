@@ -804,7 +804,9 @@ mod tests {
         let doc = api.build_openapi().unwrap();
         let json = serde_json::to_value(&doc).unwrap();
 
-        let servers = json.get("servers").expect("servers field should be present");
+        let servers = json
+            .get("servers")
+            .expect("servers field should be present");
         let arr = servers.as_array().expect("servers should be an array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("url").unwrap(), "/cw");
@@ -863,7 +865,7 @@ mod normalize_prefix_path_tests {
 
     #[test]
     fn leading_slash_prepended_when_missing() {
-        assert_eq!(ApiGateway::normalize_prefix_path("cf").unwrap(), "/cw");
+        assert_eq!(ApiGateway::normalize_prefix_path("cw").unwrap(), "/cw");
     }
 
     #[test]
