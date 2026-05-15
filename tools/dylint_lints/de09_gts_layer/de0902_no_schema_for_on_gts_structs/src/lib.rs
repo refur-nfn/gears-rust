@@ -108,11 +108,12 @@ impl<'tcx> LateLintPass<'tcx> for De0902NoSchemaForOnGtsStructs {
                 // Check the generic type argument
                 if let Some(args) = segment.args {
                     for arg in args.args {
-                        if let GenericArg::Type(hir_ty) = arg {
-                            if let Some(ty) = cx.typeck_results().node_type_opt(hir_ty.hir_id) {
-                                if is_gts_type(cx, ty) {
-                                    let type_name = get_type_name(ty);
-                                    cx.span_lint(
+                        if let GenericArg::Type(hir_ty) = arg
+                            && let Some(ty) = cx.typeck_results().node_type_opt(hir_ty.hir_id)
+                            && is_gts_type(cx, ty)
+                        {
+                            let type_name = get_type_name(ty);
+                            cx.span_lint(
                                         DE0902_NO_SCHEMA_FOR_ON_GTS_STRUCTS,
                                         callsite_span,
                                         |diag| {
@@ -126,9 +127,7 @@ impl<'tcx> LateLintPass<'tcx> for De0902NoSchemaForOnGtsStructs {
                                             ));
                                         },
                                     );
-                                    return;
-                                }
-                            }
+                            return;
                         }
                     }
                 }

@@ -1,5 +1,5 @@
 error: do not use `schema_for!(MyGtsPluginSpecV1)` on GTS-wrapped struct (DE0902)
-  --> $DIR/gts_struct_schema_for.rs:22:19
+  --> $DIR/gts_struct_schema_for.rs:21:19
    |
 LL |     let _schema = schemars::schema_for!(MyGtsPluginSpecV1);
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -76,8 +76,8 @@ impl EarlyLintPass for De0503PluginClientSuffix {
             let base_without_api = base_name.strip_suffix("Api").unwrap_or(base_name);
             let name_lower = base_name.to_lowercase();
 
-            let is_plugin_api = base_without_api.ends_with("Plugin")
-                || name_lower.contains("plugin");
+            let is_plugin_api =
+                base_without_api.ends_with("Plugin") || name_lower.contains("plugin");
 
             if is_plugin_api && !base_without_api.ends_with("Client") {
                 emit_lint(cx, item.span, trait_name, "Api", "PluginClient");

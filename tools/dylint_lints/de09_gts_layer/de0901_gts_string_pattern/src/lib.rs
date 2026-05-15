@@ -16,11 +16,13 @@ use std::collections::HashSet;
 // Thread-local storage for spans to skip (inside starts_with calls)
 thread_local! {
     static SKIP_SPANS: RefCell<HashSet<Span>> = RefCell::new(HashSet::new());
-    static IN_TEST_DEPTH: RefCell<u32> = RefCell::new(0);
+    static IN_TEST_DEPTH: RefCell<u32> = const { RefCell::new(0) };
 }
 
 const CODE_ALLOWED_VENDORS: &[&str] = &["cf"];
-const TEST_ALLOWED_VENDORS: &[&str] = &["cf", "vendor", "example", "fabrikam", "contoso", "acme", "globex"];
+const TEST_ALLOWED_VENDORS: &[&str] = &[
+    "cf", "vendor", "example", "fabrikam", "contoso", "acme", "globex",
+];
 
 dylint_linting::declare_pre_expansion_lint! {
     /// ### What it does
@@ -69,7 +71,10 @@ impl EarlyLintPass for De0901GtsStringPattern {
         // Extract both the item name and the initializer expression from const/static items.
         // Note: `Item` has no top-level `ident`; it lives inside `ConstItem` / `StaticItem`.
         let (item_name, init_expr): (&str, Option<&Expr>) = match &item.kind {
-            ItemKind::Const(ci) => (ci.ident.name.as_str(), ci.rhs.as_ref().map(|rhs| rhs.expr())),
+            ItemKind::Const(ci) => (
+                ci.ident.name.as_str(),
+                ci.rhs.as_ref().map(|rhs| rhs.expr()),
+            ),
             ItemKind::Static(si) => (si.ident.name.as_str(), si.expr.as_deref()),
             _ => return,
         };
@@ -167,21 +172,21 @@ impl EarlyLintPass for De0901GtsStringPattern {
 
         // Detect free-function calls: `GtsWildcard::new("...")` or `SomeType::new(...)` where
         // the path contains "GtsWildcard".  Arguments are allowed to contain wildcards.
-        if let ExprKind::Call(func, args) = &expr.kind {
-            if is_gts_wildcard_new_call(func) {
-                SKIP_SPANS.with(|spans| {
-                    let mut spans = spans.borrow_mut();
-                    for arg in args {
-                        collect_nested_spans(arg, &mut spans);
-                    }
-                });
-                // Validate args (including nested literals) as wildcard-allowed
-                // patterns and return early.
+        if let ExprKind::Call(func, args) = &expr.kind
+            && is_gts_wildcard_new_call(func)
+        {
+            SKIP_SPANS.with(|spans| {
+                let mut spans = spans.borrow_mut();
                 for arg in args {
-                    self.validate_nested_gts_strings(cx, arg, true);
+                    collect_nested_spans(arg, &mut spans);
                 }
-                return;
+            });
+            // Validate args (including nested literals) as wildcard-allowed
+            // patterns and return early.
+            for arg in args {
+                self.validate_nested_gts_strings(cx, arg, true);
             }
+            return;
         }
 
         // ── Phase 2: skip if this expression was marked ────────────────────────
@@ -310,15 +315,14 @@ fn is_test_item(item: &Item) -> bool {
         if name == "test" {
             return true;
         }
-        if name == "cfg" {
-            if let Some(items) = normal.item.meta_item_list() {
-                return items.iter().any(|nested| {
-                    nested.meta_item().map_or(false, |mi| {
-                        mi.path.segments.len() == 1
-                            && mi.path.segments[0].ident.name.as_str() == "test"
-                    })
-                });
-            }
+        if name == "cfg"
+            && let Some(items) = normal.item.meta_item_list()
+        {
+            return items.iter().any(|nested| {
+                nested.meta_item().is_some_and(|mi| {
+                    mi.path.segments.len() == 1 && mi.path.segments[0].ident.name.as_str() == "test"
+                })
+            });
         }
         false
     })
@@ -334,7 +338,7 @@ impl De0901GtsStringPattern {
             return;
         }
 
-        let Some(arg0) = args.get(0) else {
+        let Some(arg0) = args.first() else {
             return;
         };
 
@@ -566,7 +570,10 @@ impl De0901GtsStringPattern {
             }
             Ok(seg) if !allowed_vendors(cx, span).contains(&seg.vendor.as_str()) => {
                 cx.span_lint(DE0901_GTS_STRING_PATTERN, span, |diag| {
-                    diag.primary_message(format!("invalid GTS vendor in segment: '{}' (DE0901)", s));
+                    diag.primary_message(format!(
+                        "invalid GTS vendor in segment: '{}' (DE0901)",
+                        s
+                    ));
                     diag.note(format!(
                         "found vendor '{}', allowed vendors are 'cf' and 'example'",
                         seg.vendor
@@ -586,9 +593,7 @@ impl De0901GtsStringPattern {
     ) {
         let vendors = allowed_vendors(cx, span);
         for (idx, seg) in result.segments.iter().enumerate() {
-            if seg.vendor.is_empty()
-                || seg.vendor == "*"
-                || vendors.contains(&seg.vendor.as_str())
+            if seg.vendor.is_empty() || seg.vendor == "*" || vendors.contains(&seg.vendor.as_str())
             {
                 continue;
             }

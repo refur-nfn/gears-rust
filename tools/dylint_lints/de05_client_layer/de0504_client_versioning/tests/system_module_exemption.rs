@@ -5,7 +5,6 @@
 /// they already have V1 suffixes from the refactoring).
 ///
 /// Positive-case testing (lint fires on bad code) is covered by UI tests in ui/.
-
 use std::process::Command;
 
 fn workspace_root() -> std::path::PathBuf {
@@ -22,7 +21,12 @@ fn workspace_root() -> std::path::PathBuf {
 #[test]
 fn test_system_modules_are_exempt() {
     let output = Command::new("cargo")
-        .args(&["check", "-p", "cyberware-tenant-resolver-sdk", "--message-format=json"])
+        .args([
+            "check",
+            "-p",
+            "cyberware-tenant-resolver-sdk",
+            "--message-format=json",
+        ])
         .current_dir(workspace_root())
         .output()
         .expect("Failed to run cargo check on system module");
@@ -38,28 +42,30 @@ fn test_system_modules_are_exempt() {
         stdout
     );
 
-    let has_de0504_error = stdout.lines()
-        .chain(stderr.lines())
-        .any(|line| {
-            line.contains("de0504_client_versioning")
+    let has_de0504_error = stdout.lines().chain(stderr.lines()).any(|line| {
+        line.contains("de0504_client_versioning")
             || line.contains("DE0504")
             || (line.contains("Client trait") && line.contains("version suffix"))
-        });
+    });
 
     assert!(
         !has_de0504_error,
         "System module tenant_resolver-sdk should NOT trigger DE0504 for TenantResolverClient\n\
          System modules (modules/system/*) are exempt from versioning requirements.\n\
          Stderr: {}\nStdout: {}",
-        stderr,
-        stdout
+        stderr, stdout
     );
 }
 
 #[test]
 fn test_non_system_modules_require_versioning() {
     let output = Command::new("cargo")
-        .args(&["check", "-p", "cyberware-simple-user-settings-sdk", "--message-format=json"])
+        .args([
+            "check",
+            "-p",
+            "cyberware-simple-user-settings-sdk",
+            "--message-format=json",
+        ])
         .current_dir(workspace_root())
         .output()
         .expect("Failed to run cargo check on non-system module");
@@ -76,12 +82,10 @@ fn test_non_system_modules_require_versioning() {
         stdout
     );
 
-    let has_de0504_error = stdout.lines()
-        .chain(stderr.lines())
-        .any(|line| {
-            line.contains("de0504_client_versioning")
+    let has_de0504_error = stdout.lines().chain(stderr.lines()).any(|line| {
+        line.contains("de0504_client_versioning")
             || (line.contains("must have a version suffix") && line.contains("DE0504"))
-        });
+    });
 
     assert!(
         !has_de0504_error,
@@ -89,15 +93,14 @@ fn test_non_system_modules_require_versioning() {
          because it has V1 suffixes.\n\
          If this fails, the V1 refactoring is incomplete.\n\
          Stderr: {}\nStdout: {}",
-        stderr,
-        stdout
+        stderr, stdout
     );
 }
 
 #[test]
 fn test_examples_require_versioning() {
     let output = Command::new("cargo")
-        .args(&["check", "-p", "users-info-sdk", "--message-format=json"])
+        .args(["check", "-p", "users-info-sdk", "--message-format=json"])
         .current_dir(workspace_root())
         .output()
         .expect("Failed to run cargo check on example");
@@ -114,19 +117,16 @@ fn test_examples_require_versioning() {
         stdout
     );
 
-    let has_de0504_error = stdout.lines()
-        .chain(stderr.lines())
-        .any(|line| {
-            line.contains("de0504_client_versioning")
+    let has_de0504_error = stdout.lines().chain(stderr.lines()).any(|line| {
+        line.contains("de0504_client_versioning")
             || (line.contains("must have a version suffix") && line.contains("DE0504"))
-        });
+    });
 
     assert!(
         !has_de0504_error,
         "Example user_info-sdk should compile without DE0504 errors because it has V1 suffixes.\n\
          If this fails, the V1 refactoring is incomplete.\n\
          Stderr: {}\nStdout: {}",
-        stderr,
-        stdout
+        stderr, stdout
     );
 }

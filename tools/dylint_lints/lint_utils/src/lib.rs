@@ -70,15 +70,13 @@ pub fn filename_str(source_map: &SourceMap, span: Span) -> Option<String> {
 pub fn is_temp_path(path: &str) -> bool {
     // Primary check: compare against the actual system temp directory
     let temp_dir = std::env::temp_dir();
-    if let Some(temp_str) = temp_dir.to_str() {
-        if path.starts_with(temp_str) {
-            return true;
-        }
+    if let Some(temp_str) = temp_dir.to_str()
+        && path.starts_with(temp_str)
+    {
+        return true;
     }
     // Fallback patterns for known temp directory locations
-    path.contains("/tmp/")
-        || path.contains("/var/folders/")
-        || path.contains("\\Temp\\")
+    path.contains("/tmp/") || path.contains("/var/folders/") || path.contains("\\Temp\\")
 }
 
 /// Result of parsing a version suffix from a name like `FooClientV1` or `FooClient2`.
@@ -186,20 +184,18 @@ pub fn parse_version_suffix(name: &str) -> VersionParts<'_> {
 /// `dylint_testing::ui_test_examples()` compiles UI test files from temp dirs without
 /// passing `--crate-name`, so the crate name check alone doesn't work for UI tests.
 pub fn is_in_sdk_crate(cx: &rustc_lint::EarlyContext<'_>, span: Span) -> bool {
-    if let Some(crate_name) = cx.sess().opts.crate_name.as_deref() {
+    if let Some(crate_name) = cx.sess().opts.crate_name.as_deref()
         // Cargo normalizes dashes to underscores for `--crate-name`.
-        if crate_name.ends_with("-sdk") || crate_name.ends_with("_sdk") {
-            return true;
-        }
+        && (crate_name.ends_with("-sdk") || crate_name.ends_with("_sdk"))
+    {
+        return true;
     }
 
     let Some(file_path) = filename_str(cx.sess().source_map(), span) else {
         return false;
     };
 
-    file_path.contains("-sdk/")
-        || file_path.contains("-sdk\\")
-        || is_temp_path(&file_path)
+    file_path.contains("-sdk/") || file_path.contains("-sdk\\") || is_temp_path(&file_path)
 }
 
 /// Check if span is within libs/modkit-db/ - the internal sqlx wrapper library
@@ -528,15 +524,11 @@ fn get_path_str_from_session(source_map: &SourceMap, span: Span) -> Option<Strin
     let file_name = source_map.span_to_filename(span);
 
     match file_name {
-        FileName::Real(ref real_name) => {
-            if let Some(local) = real_name.local_path() {
-                return Some(local.to_string_lossy().to_string());
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    };
+        FileName::Real(ref real_name) => real_name
+            .local_path()
+            .map(|local| local.to_string_lossy().to_string()),
+        _ => None,
+    }
 }
 
 /// Extract simulated directory path from a comment at the start of a file.
@@ -643,14 +635,15 @@ pub fn test_comment_annotations_match_stderr(
         let mut error_lines = HashSet::new();
         for line in stderr_content.lines() {
             // Look for lines like "  --> $DIR/file.rs:5:1"
-            if line.contains("-->") && line.contains(".rs:") {
-                if let Some(pos) = line.rfind(".rs:") {
-                    let rest = &line[pos + 4..];
-                    if let Some(colon_pos) = rest.find(':') {
-                        if let Ok(line_num) = rest[..colon_pos].parse::<usize>() {
-                            error_lines.insert(line_num);
-                        }
-                    }
+            if line.contains("-->")
+                && line.contains(".rs:")
+                && let Some(pos) = line.rfind(".rs:")
+            {
+                let rest = &line[pos + 4..];
+                if let Some(colon_pos) = rest.find(':')
+                    && let Ok(line_num) = rest[..colon_pos].parse::<usize>()
+                {
+                    error_lines.insert(line_num);
                 }
             }
         }

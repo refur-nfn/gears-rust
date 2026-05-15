@@ -139,15 +139,15 @@ fn check_type_in_domain(cx: &rustc_lint::EarlyContext<'_>, ty: &Ty) {
 
             // Recursively check generic arguments (e.g., Option<sqlx::PgPool>)
             for segment in &path.segments {
-                if let Some(args) = &segment.args {
-                    if let rustc_ast::GenericArgs::AngleBracketed(ref angle_args) = **args {
-                        for arg in &angle_args.args {
-                            if let rustc_ast::AngleBracketedArg::Arg(rustc_ast::GenericArg::Type(
-                                inner_ty,
-                            )) = arg
-                            {
-                                check_type_in_domain(cx, inner_ty);
-                            }
+                if let Some(args) = &segment.args
+                    && let rustc_ast::GenericArgs::AngleBracketed(ref angle_args) = **args
+                {
+                    for arg in &angle_args.args {
+                        if let rustc_ast::AngleBracketedArg::Arg(rustc_ast::GenericArg::Type(
+                            inner_ty,
+                        )) = arg
+                        {
+                            check_type_in_domain(cx, inner_ty);
                         }
                     }
                 }

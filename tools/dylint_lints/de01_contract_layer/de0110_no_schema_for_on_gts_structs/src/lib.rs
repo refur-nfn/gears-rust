@@ -98,7 +98,9 @@ impl<'tcx> LateLintPass<'tcx> for De0110NoSchemaForOnGtsStructs {
 
                 // Check if the callsite is a schema_for! macro call by looking at the source
                 let source_map = cx.sess().source_map();
-                let snippet = source_map.span_to_snippet(callsite_span).unwrap_or_default();
+                let snippet = source_map
+                    .span_to_snippet(callsite_span)
+                    .unwrap_or_default();
                 if !snippet.contains("schema_for!") {
                     return;
                 }
@@ -106,11 +108,12 @@ impl<'tcx> LateLintPass<'tcx> for De0110NoSchemaForOnGtsStructs {
                 // Check the generic type argument
                 if let Some(args) = segment.args {
                     for arg in args.args {
-                        if let GenericArg::Type(hir_ty) = arg {
-                            if let Some(ty) = cx.typeck_results().node_type_opt(hir_ty.hir_id) {
-                                if is_gts_type(cx, ty) {
-                                    let type_name = get_type_name(ty);
-                                    cx.span_lint(
+                        if let GenericArg::Type(hir_ty) = arg
+                            && let Some(ty) = cx.typeck_results().node_type_opt(hir_ty.hir_id)
+                            && is_gts_type(cx, ty)
+                        {
+                            let type_name = get_type_name(ty);
+                            cx.span_lint(
                                         DE0110_NO_SCHEMA_FOR_ON_GTS_STRUCTS,
                                         callsite_span,
                                         |diag| {
@@ -124,9 +127,7 @@ impl<'tcx> LateLintPass<'tcx> for De0110NoSchemaForOnGtsStructs {
                                             ));
                                         },
                                     );
-                                    return;
-                                }
-                            }
+                            return;
                         }
                     }
                 }

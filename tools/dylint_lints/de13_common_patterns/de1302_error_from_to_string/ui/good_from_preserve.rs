@@ -24,7 +24,7 @@ enum AppError {
 
 impl From<DatabaseError> for AppError {
     fn from(e: DatabaseError) -> Self {
-        AppError::Database(e)  // error chain preserved
+        AppError::Database(e) // error chain preserved
     }
 }
 
@@ -34,7 +34,7 @@ struct ParseError(String);
 
 impl From<String> for ParseError {
     fn from(s: String) -> Self {
-        ParseError(s.to_string())  // not From<XxxError>, not flagged
+        ParseError(s.to_string()) // not From<XxxError>, not flagged
     }
 }
 

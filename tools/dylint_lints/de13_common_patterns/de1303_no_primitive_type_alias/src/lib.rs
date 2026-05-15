@@ -81,16 +81,11 @@ impl EarlyLintPass for De1303NoPrimitiveTypeAlias {
         // like `uuid::Uuid` work because we only inspect the last path segment.
         const PRIMITIVE_BACKING_TYPES: &[&str] = &[
             // UUID / identifier types
-            "Uuid", "Ulid",
-            // String
-            "String",
-            // Unsigned integers
-            "u8", "u16", "u32", "u64", "u128", "usize",
-            // Signed integers
-            "i8", "i16", "i32", "i64", "i128", "isize",
-            // Floating point
-            "f32", "f64",
-            // Other primitives
+            "Uuid", "Ulid",   // String
+            "String", // Unsigned integers
+            "u8", "u16", "u32", "u64", "u128", "usize", // Signed integers
+            "i8", "i16", "i32", "i64", "i128", "isize", // Floating point
+            "f32", "f64", // Other primitives
             "bool", "char",
         ];
 

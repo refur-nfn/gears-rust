@@ -53,55 +53,56 @@ impl<'tcx> LateLintPass<'tcx> for De0205OperationBuilder {
             if let Some(init) = local.init {
                 check_complete_builder_chain(cx, init);
             }
-        } else if let rustc_hir::StmtKind::Semi(expr) | rustc_hir::StmtKind::Expr(expr) = stmt.kind {
+        } else if let rustc_hir::StmtKind::Semi(expr) | rustc_hir::StmtKind::Expr(expr) = stmt.kind
+        {
             check_complete_builder_chain(cx, expr);
         }
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx rustc_hir::Expr<'tcx>) {
         // Validate tag/summary format when called
-        if let rustc_hir::ExprKind::MethodCall(path, receiver, args, _span) = expr.kind {
-            if is_operation_builder_type(cx, receiver) {
-                let method_name = path.ident.name.as_str();
+        if let rustc_hir::ExprKind::MethodCall(path, receiver, args, _span) = expr.kind
+            && is_operation_builder_type(cx, receiver)
+        {
+            let method_name = path.ident.name.as_str();
 
-                match method_name {
-                    "tag" => {
-                        if let Some(tag_arg) = args.first() {
-                            if let Some(tag_string) = extract_tag_value(cx, tag_arg) {
-                                if !is_valid_tag_format(&tag_string) {
-                                    cx.span_lint(DE0205_OPERATION_BUILDER, tag_arg.span, |diag| {
+            match method_name {
+                "tag" => {
+                    if let Some(tag_arg) = args.first() {
+                        if let Some(tag_string) = extract_tag_value(cx, tag_arg) {
+                            if !is_valid_tag_format(&tag_string) {
+                                cx.span_lint(DE0205_OPERATION_BUILDER, tag_arg.span, |diag| {
                                         diag.primary_message("tag format is invalid");
                                         diag.help("tags must contain whitespace-separated words, each starting with a capital letter");
                                         diag.note("example: \"User Management\", \"Simple Resource Registry\"");
                                     });
-                                }
-                            } else {
-                                cx.span_lint(DE0205_OPERATION_BUILDER, tag_arg.span, |diag| {
+                            }
+                        } else {
+                            cx.span_lint(DE0205_OPERATION_BUILDER, tag_arg.span, |diag| {
                                     diag.primary_message("tag must be a string literal or const string");
                                     diag.help("use a string literal like `.tag(\"Your Tag\")` or a const string");
                                 });
-                            }
                         }
                     }
-                    "summary" => {
-                        if let Some(summary_arg) = args.first() {
-                            if let Some(summary_string) = extract_tag_value(cx, summary_arg) {
-                                if summary_string.trim().is_empty() {
-                                    cx.span_lint(DE0205_OPERATION_BUILDER, summary_arg.span, |diag| {
-                                        diag.primary_message("summary cannot be empty");
-                                        diag.help("provide a meaningful summary for the operation");
-                                    });
-                                }
-                            } else {
+                }
+                "summary" => {
+                    if let Some(summary_arg) = args.first() {
+                        if let Some(summary_string) = extract_tag_value(cx, summary_arg) {
+                            if summary_string.trim().is_empty() {
                                 cx.span_lint(DE0205_OPERATION_BUILDER, summary_arg.span, |diag| {
+                                    diag.primary_message("summary cannot be empty");
+                                    diag.help("provide a meaningful summary for the operation");
+                                });
+                            }
+                        } else {
+                            cx.span_lint(DE0205_OPERATION_BUILDER, summary_arg.span, |diag| {
                                     diag.primary_message("summary must be a string literal or const string");
                                     diag.help("use a string literal like `.summary(\"Your summary\")` or a const string");
                                 });
-                            }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
     }
@@ -146,16 +147,18 @@ fn check_complete_builder_chain(cx: &LateContext<'_>, expr: &rustc_hir::Expr<'_>
 fn contains_operation_builder_constructor(expr: &rustc_hir::Expr<'_>) -> bool {
     match expr.kind {
         rustc_hir::ExprKind::Call(func, _) => {
-            if let rustc_hir::ExprKind::Path(qpath) = &func.kind {
-                if let rustc_hir::QPath::TypeRelative(ty, segment) = qpath {
-                    if let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = &ty.kind {
-                        let type_str = format!("{:?}", path);
-                        let method_name = segment.ident.name.as_str();
-                        return type_str.contains("OperationBuilder")
-                            && type_str.contains("modkit")
-                            && matches!(method_name, "get" | "post" | "put" | "delete" | "patch" | "head" | "options");
-                    }
-                }
+            if let rustc_hir::ExprKind::Path(qpath) = &func.kind
+                && let rustc_hir::QPath::TypeRelative(ty, segment) = qpath
+                && let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = &ty.kind
+            {
+                let type_str = format!("{:?}", path);
+                let method_name = segment.ident.name.as_str();
+                return type_str.contains("OperationBuilder")
+                    && type_str.contains("modkit")
+                    && matches!(
+                        method_name,
+                        "get" | "post" | "put" | "delete" | "patch" | "head" | "options"
+                    );
             }
             false
         }
@@ -176,22 +179,15 @@ fn get_builder_constructor_span(expr: &rustc_hir::Expr<'_>) -> Span {
     }
 }
 
-fn check_builder_chain(
-    expr: &rustc_hir::Expr<'_>,
-    has_tag: &mut bool,
-    has_summary: &mut bool,
-) {
-    match expr.kind {
-        rustc_hir::ExprKind::MethodCall(path, receiver, _, _) => {
-            let method_name = path.ident.name.as_str();
-            if method_name == "tag" {
-                *has_tag = true;
-            } else if method_name == "summary" {
-                *has_summary = true;
-            }
-            check_builder_chain(receiver, has_tag, has_summary);
+fn check_builder_chain(expr: &rustc_hir::Expr<'_>, has_tag: &mut bool, has_summary: &mut bool) {
+    if let rustc_hir::ExprKind::MethodCall(path, receiver, _, _) = expr.kind {
+        let method_name = path.ident.name.as_str();
+        if method_name == "tag" {
+            *has_tag = true;
+        } else if method_name == "summary" {
+            *has_summary = true;
         }
-        _ => {}
+        check_builder_chain(receiver, has_tag, has_summary);
     }
 }
 
@@ -202,10 +198,10 @@ fn is_operation_builder_type(cx: &LateContext<'_>, expr: &rustc_hir::Expr<'_>) -
 }
 
 fn extract_tag_value(cx: &LateContext<'_>, expr: &rustc_hir::Expr<'_>) -> Option<String> {
-    if let rustc_hir::ExprKind::Lit(lit) = expr.kind {
-        if let rustc_ast::LitKind::Str(symbol, _) = lit.node {
-            return Some(symbol.to_string());
-        }
+    if let rustc_hir::ExprKind::Lit(lit) = expr.kind
+        && let rustc_ast::LitKind::Str(symbol, _) = lit.node
+    {
+        return Some(symbol.to_string());
     }
 
     if let Some(Constant::Str(s)) = ConstEvalCtxt::new(cx).eval(expr) {

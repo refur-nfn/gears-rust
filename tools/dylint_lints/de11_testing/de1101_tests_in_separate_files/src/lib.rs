@@ -316,19 +316,19 @@ fn find_test_violations(
             // Without #[path]: any module name is accepted.
             // With #[path]: value must be `{stem}_tests.rs` or `{stem}_test.rs`.
             if is_out_of_line_mod_decl(trimmed) {
-                if let (Some(stem), Some(pv)) = (source_stem, &path_attr_value) {
-                    if !reported_naming {
-                        let expected = format!("{stem}_tests");
-                        let filename = pv.rsplit('/').next().unwrap_or(pv);
-                        let actual = filename.strip_suffix(".rs").unwrap_or(filename);
+                if let (Some(stem), Some(pv)) = (source_stem, &path_attr_value)
+                    && !reported_naming
+                {
+                    let expected = format!("{stem}_tests");
+                    let filename = pv.rsplit('/').next().unwrap_or(pv);
+                    let actual = filename.strip_suffix(".rs").unwrap_or(filename);
 
-                        if actual != expected {
-                            violations.push(TestViolation::WrongPathAttr {
-                                expected,
-                                actual: actual.to_string(),
-                            });
-                            reported_naming = true;
-                        }
+                    if actual != expected {
+                        violations.push(TestViolation::WrongPathAttr {
+                            expected,
+                            actual: actual.to_string(),
+                        });
+                        reported_naming = true;
                     }
                 }
                 break;
@@ -413,11 +413,17 @@ fn contains_test_cfg_operand(input: &str) -> bool {
             return true;
         }
 
-        if let Some(inner) = arg.strip_prefix("all(").and_then(|rest| rest.strip_suffix(')')) {
+        if let Some(inner) = arg
+            .strip_prefix("all(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
             return contains_test_cfg_operand(inner);
         }
 
-        if let Some(inner) = arg.strip_prefix("any(").and_then(|rest| rest.strip_suffix(')')) {
+        if let Some(inner) = arg
+            .strip_prefix("any(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
             return contains_test_cfg_operand(inner);
         }
 
@@ -466,12 +472,12 @@ fn extract_path_attr_value(line: &str) -> Option<String> {
 
 /// Strip a leading visibility qualifier from a line, including `pub(in path)`.
 fn strip_visibility(line: &str) -> &str {
-    if let Some(rest) = line.strip_prefix("pub(in ") {
+    if let Some(rest) = line.strip_prefix("pub(in ")
         // Find the closing ')' and skip past it plus any trailing space.
-        if let Some(close) = rest.find(')') {
-            let after = &rest[close + 1..];
-            return after.strip_prefix(' ').unwrap_or(after);
-        }
+        && let Some(close) = rest.find(')')
+    {
+        let after = &rest[close + 1..];
+        return after.strip_prefix(' ').unwrap_or(after);
     }
     line.strip_prefix("pub(crate) ")
         .or_else(|| line.strip_prefix("pub(super) "))
@@ -643,9 +649,11 @@ fn main() {}
 "#;
         // Threshold 3: the test block is 4 lines (mod tests { ... }), trigger.
         let violations = find_test_violations(source, Some("handler"), false, 3);
-        assert!(violations
-            .iter()
-            .any(|v| matches!(v, super::TestViolation::InlineTestCode)));
+        assert!(
+            violations
+                .iter()
+                .any(|v| matches!(v, super::TestViolation::InlineTestCode))
+        );
     }
 
     #[test]
@@ -661,7 +669,10 @@ fn main() {}
 "#;
         // Threshold 100: the test block is ~6 lines total, allow.
         let violations = find_test_violations(source, Some("handler"), false, 100);
-        assert!(violations.is_empty(), "expected no violations under threshold");
+        assert!(
+            violations.is_empty(),
+            "expected no violations under threshold"
+        );
     }
 
     #[test]
@@ -677,9 +688,11 @@ fn main() {}
 "#;
         // Even tiny inline tests are denied when companion exists.
         let violations = find_test_violations(source, Some("handler"), true, 100);
-        assert!(violations
-            .iter()
-            .any(|v| matches!(v, super::TestViolation::InlineTestCodeWithCompanion)));
+        assert!(
+            violations
+                .iter()
+                .any(|v| matches!(v, super::TestViolation::InlineTestCodeWithCompanion))
+        );
     }
 
     #[test]

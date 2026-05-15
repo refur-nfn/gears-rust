@@ -156,7 +156,8 @@ setup: .setup-stamp
 # Check code formatting
 fmt:
 	$(call check_rustup_component,rustfmt)
-	cargo fmt --all -- --check
+	cargo fmt --all --check
+	cargo fmt --all --check --manifest-path tools/dylint_lints/Cargo.toml
 
 # -------- Module naming validation --------
 
@@ -332,6 +333,7 @@ dev-fmt:
 ## Auto-fix clippy warnings
 dev-clippy:
 	cargo clippy --workspace --all-targets --all-features --fix --allow-dirty
+	@cd tools/dylint_lints && cargo clippy --all-targets --workspace
 
 # Auto-fix formatting and clippy warnings
 dev: dev-fmt dev-clippy dev-test

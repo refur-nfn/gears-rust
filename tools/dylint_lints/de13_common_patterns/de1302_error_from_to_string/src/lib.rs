@@ -178,10 +178,10 @@ fn is_to_string_def<'tcx>(cx: &LateContext<'tcx>, def_id: DefId) -> bool {
 /// skipped: if a user-defined macro expands to `.to_string()` on a source
 /// error, the chain is just as lost as if they had written it inline.
 fn is_hidden_expansion(span: rustc_span::Span) -> bool {
-    match span.ctxt().outer_expn_data().kind {
-        ExpnKind::Macro(MacroKind::Attr | MacroKind::Derive, _) | ExpnKind::Desugaring(_) => true,
-        _ => false,
-    }
+    matches!(
+        span.ctxt().outer_expn_data().kind,
+        ExpnKind::Macro(MacroKind::Attr | MacroKind::Derive, _) | ExpnKind::Desugaring(_)
+    )
 }
 
 impl<'tcx> hir::intravisit::Visitor<'tcx> for ToStringVisitor<'tcx, '_> {

@@ -57,7 +57,7 @@ struct ManagedSecret {
     data: Vec<u8>,
 }
 
-fn secure_erase(buf: &mut Vec<u8>) {
+fn secure_erase(buf: &mut [u8]) {
     buf.fill(0); // outside Drop — not flagged
 }
 

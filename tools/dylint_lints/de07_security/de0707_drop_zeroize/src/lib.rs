@@ -16,10 +16,8 @@ use rustc_span::symbol::Symbol;
 
 /// Pre-interned symbols used in `is_ptr_write_bytes`. Initialized once at first call
 /// rather than re-interning on every lint invocation.
-static SYM_CORE: std::sync::LazyLock<Symbol> =
-    std::sync::LazyLock::new(|| Symbol::intern("core"));
-static SYM_STD: std::sync::LazyLock<Symbol> =
-    std::sync::LazyLock::new(|| Symbol::intern("std"));
+static SYM_CORE: std::sync::LazyLock<Symbol> = std::sync::LazyLock::new(|| Symbol::intern("core"));
+static SYM_STD: std::sync::LazyLock<Symbol> = std::sync::LazyLock::new(|| Symbol::intern("std"));
 static SYM_WRITE_BYTES: std::sync::LazyLock<Symbol> =
     std::sync::LazyLock::new(|| Symbol::intern("write_bytes"));
 
@@ -92,10 +90,10 @@ dylint_linting::declare_late_lint! {
 
 /// Returns true if `expr` is the integer literal `0` (with any type suffix, e.g. `0u8`).
 fn is_zero_literal(expr: &Expr<'_>) -> bool {
-    if let ExprKind::Lit(lit) = expr.kind {
-        if let rustc_ast::ast::LitKind::Int(n, _) = lit.node {
-            return n.get() == 0;
-        }
+    if let ExprKind::Lit(lit) = expr.kind
+        && let rustc_ast::ast::LitKind::Int(n, _) = lit.node
+    {
+        return n.get() == 0;
     }
     false
 }
@@ -155,11 +153,12 @@ impl<'tcx> hir::intravisit::Visitor<'tcx> for ZeroingVisitor<'tcx, '_> {
             // Pattern: *buf = 0 (deref-assign to zero).
             // Only flagged when the inner expression is a `u8` pointer/reference.
             ExprKind::Assign(lhs, rhs, _) => {
-                if let ExprKind::Unary(hir::UnOp::Deref, inner) = lhs.kind {
-                    if is_zero_literal(rhs) {
-                        let inner_ty = self.typeck.expr_ty(inner);
-                        if is_u8_ptr_or_ref(inner_ty) {
-                            self.cx.span_lint(DE0707_DROP_ZEROIZE, expr.span, |diag| {
+                if let ExprKind::Unary(hir::UnOp::Deref, inner) = lhs.kind
+                    && is_zero_literal(rhs)
+                {
+                    let inner_ty = self.typeck.expr_ty(inner);
+                    if is_u8_ptr_or_ref(inner_ty) {
+                        self.cx.span_lint(DE0707_DROP_ZEROIZE, expr.span, |diag| {
                                 diag.primary_message(
                                     "manual byte-zeroing in `Drop::drop` may be eliminated by the optimizer (DE0707)",
                                 );
@@ -170,7 +169,6 @@ impl<'tcx> hir::intravisit::Visitor<'tcx> for ZeroingVisitor<'tcx, '_> {
                                     "LLVM dead-store elimination can legally remove writes that are never read; `zeroize` uses a compiler fence to prevent this",
                                 );
                             });
-                        }
                     }
                 }
             }
@@ -178,20 +176,21 @@ impl<'tcx> hir::intravisit::Visitor<'tcx> for ZeroingVisitor<'tcx, '_> {
             // Only flagged when the method resolves to core/std (not a custom `fill` method)
             // and the auto-deref'd receiver type is a `[u8]` or `[u8; N]` byte slice.
             ExprKind::MethodCall(seg, recv, args, _) => {
-                if seg.ident.name.as_str() == "fill" {
-                    if let Some(arg) = args.first() {
-                        if is_zero_literal(arg) {
-                            let method_in_std = self
-                                .typeck
-                                .type_dependent_def_id(expr.hir_id)
-                                .map_or(false, |did| {
-                                    let krate = self.cx.tcx.crate_name(did.krate);
-                                    krate == *SYM_CORE || krate == *SYM_STD
-                                });
-                            // Use adjusted type so Vec<u8> auto-derefs to [u8]
-                            let recv_ty = self.typeck.expr_ty_adjusted(recv);
-                            if method_in_std && has_u8_element(recv_ty) {
-                                self.cx.span_lint(DE0707_DROP_ZEROIZE, expr.span, |diag| {
+                if seg.ident.name.as_str() == "fill"
+                    && let Some(arg) = args.first()
+                    && is_zero_literal(arg)
+                {
+                    let method_in_std =
+                        self.typeck
+                            .type_dependent_def_id(expr.hir_id)
+                            .is_some_and(|did| {
+                                let krate = self.cx.tcx.crate_name(did.krate);
+                                krate == *SYM_CORE || krate == *SYM_STD
+                            });
+                    // Use adjusted type so Vec<u8> auto-derefs to [u8]
+                    let recv_ty = self.typeck.expr_ty_adjusted(recv);
+                    if method_in_std && has_u8_element(recv_ty) {
+                        self.cx.span_lint(DE0707_DROP_ZEROIZE, expr.span, |diag| {
                                     diag.primary_message(
                                         "manual byte-zeroing in `Drop::drop` may be eliminated by the optimizer (DE0707)",
                                     );
@@ -202,8 +201,6 @@ impl<'tcx> hir::intravisit::Visitor<'tcx> for ZeroingVisitor<'tcx, '_> {
                                         "LLVM dead-store elimination can legally remove writes that are never read; `zeroize` uses a compiler fence to prevent this",
                                     );
                                 });
-                            }
-                        }
                     }
                 }
             }
@@ -211,15 +208,14 @@ impl<'tcx> hir::intravisit::Visitor<'tcx> for ZeroingVisitor<'tcx, '_> {
             // Only flagged when the function resolves to `core::ptr::write_bytes`,
             // not a user-defined helper with the same name.
             ExprKind::Call(func, args) => {
-                if args.len() >= 2 {
-                    if let Some(fill_byte) = args.get(1) {
-                        if is_zero_literal(fill_byte) {
-                            if let ExprKind::Path(qpath) = &func.kind {
-                                if let Some(def_id) =
-                                    self.cx.qpath_res(qpath, func.hir_id).opt_def_id()
-                                {
-                                    if is_ptr_write_bytes(self.cx, def_id) {
-                                        self.cx.span_lint(
+                if args.len() >= 2
+                    && let Some(fill_byte) = args.get(1)
+                    && is_zero_literal(fill_byte)
+                    && let ExprKind::Path(qpath) = &func.kind
+                    && let Some(def_id) = self.cx.qpath_res(qpath, func.hir_id).opt_def_id()
+                    && is_ptr_write_bytes(self.cx, def_id)
+                {
+                    self.cx.span_lint(
                                             DE0707_DROP_ZEROIZE,
                                             expr.span,
                                             |diag| {
@@ -234,11 +230,6 @@ impl<'tcx> hir::intravisit::Visitor<'tcx> for ZeroingVisitor<'tcx, '_> {
                                                 );
                                             },
                                         );
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
             _ => {}

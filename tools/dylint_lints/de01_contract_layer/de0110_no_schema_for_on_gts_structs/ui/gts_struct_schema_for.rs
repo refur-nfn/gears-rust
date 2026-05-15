@@ -1,7 +1,6 @@
 //! Test case: schema_for! on GTS-wrapped struct should trigger DE0110
 
 use gts_macros::struct_to_gts_schema;
-use schemars;
 
 /// A GTS-wrapped struct (has struct_to_gts_schema attribute)
 #[derive(Debug, Clone)]

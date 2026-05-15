@@ -50,11 +50,7 @@ dylint_linting::declare_early_lint! {
 
 /// HTTP-related patterns forbidden in domain code
 /// Only includes frameworks actually used in the project: axum, hyper, http
-const HTTP_PATTERNS: &[&str] = &[
-    "http",
-    "axum",
-    "hyper",
-];
+const HTTP_PATTERNS: &[&str] = &["http", "axum", "hyper"];
 
 /// Check if a path matches an HTTP pattern.
 /// Returns true only if path equals pattern exactly or starts with "pattern::"
@@ -106,15 +102,15 @@ fn check_type_in_domain(cx: &rustc_lint::EarlyContext<'_>, ty: &Ty) {
 
             // Recursively check generic arguments (e.g., Option<http::StatusCode>)
             for segment in &path.segments {
-                if let Some(args) = &segment.args {
-                    if let rustc_ast::GenericArgs::AngleBracketed(ref angle_args) = **args {
-                        for arg in &angle_args.args {
-                            if let rustc_ast::AngleBracketedArg::Arg(rustc_ast::GenericArg::Type(
-                                inner_ty,
-                            )) = arg
-                            {
-                                check_type_in_domain(cx, inner_ty);
-                            }
+                if let Some(args) = &segment.args
+                    && let rustc_ast::GenericArgs::AngleBracketed(ref angle_args) = **args
+                {
+                    for arg in &angle_args.args {
+                        if let rustc_ast::AngleBracketedArg::Arg(rustc_ast::GenericArg::Type(
+                            inner_ty,
+                        )) = arg
+                        {
+                            check_type_in_domain(cx, inner_ty);
                         }
                     }
                 }

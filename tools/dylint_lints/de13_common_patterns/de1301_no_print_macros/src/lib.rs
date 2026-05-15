@@ -4,7 +4,9 @@
 extern crate rustc_ast;
 extern crate rustc_span;
 
-use rustc_ast::{Attribute, AttrKind, ExprKind, Item, ItemKind, MacCall, VisibilityKind, visit, visit::Visitor};
+use rustc_ast::{
+    AttrKind, Attribute, ExprKind, Item, ItemKind, MacCall, VisibilityKind, visit, visit::Visitor,
+};
 use rustc_lint::{EarlyContext, EarlyLintPass, LintContext};
 use rustc_session::config::CrateType;
 use rustc_span::{FileName, sym};
@@ -71,19 +73,11 @@ fn is_allowed_location(cx: &EarlyContext<'_>, span: rustc_span::Span) -> bool {
 }
 
 fn is_proc_macro_crate(cx: &EarlyContext<'_>) -> bool {
-    cx.sess()
-        .opts
-        .crate_types
-        .iter()
-        .any(|t| *t == CrateType::ProcMacro)
+    cx.sess().opts.crate_types.contains(&CrateType::ProcMacro)
 }
 
 fn is_bin_crate(cx: &EarlyContext<'_>) -> bool {
-    cx.sess()
-        .opts
-        .crate_types
-        .iter()
-        .any(|t| *t == CrateType::Executable)
+    cx.sess().opts.crate_types.contains(&CrateType::Executable)
 }
 
 fn extract_simulated_path(path_str: &str) -> Option<String> {
@@ -156,8 +150,7 @@ impl<'ast, 'a, 'cx> visit::Visitor<'ast> for ForbiddenMacroVisitor<'a, 'cx> {
 
         match &item.kind {
             ItemKind::Fn(_fn_item) => {
-                let is_binary_entry =
-                    self.allow_stack.is_empty() && self.is_bin_crate;
+                let is_binary_entry = self.allow_stack.is_empty() && self.is_bin_crate;
                 let is_private = matches!(item.vis.kind, VisibilityKind::Inherited);
                 let allow_here = parent_allow
                     || is_binary_entry
@@ -236,16 +229,16 @@ fn is_test_item(attrs: &[Attribute]) -> bool {
             return true;
         }
 
-        if let Some(ident) = attr.path().last() {
-            if *ident == sym::test {
-                return true;
-            }
+        if let Some(ident) = attr.path().last()
+            && *ident == sym::test
+        {
+            return true;
         }
 
-        if attr.has_name(sym::cfg) {
-            if let Some(list) = attr.meta_item_list() {
-                return list.iter().any(|item| item.has_name(sym::test));
-            }
+        if attr.has_name(sym::cfg)
+            && let Some(list) = attr.meta_item_list()
+        {
+            return list.iter().any(|item| item.has_name(sym::test));
         }
 
         false

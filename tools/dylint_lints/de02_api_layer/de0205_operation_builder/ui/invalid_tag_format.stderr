@@ -1,7 +1,7 @@
 error: tag format is invalid
   --> $DIR/invalid_tag_format.rs:11:14
    |
-LL |         .tag("simple resource registry")  // lowercase words
+LL |         .tag("simple resource registry") // lowercase words
    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: tags must contain whitespace-separated words, each starting with a capital letter
@@ -11,7 +11,7 @@ LL |         .tag("simple resource registry")  // lowercase words
 error: tag format is invalid
   --> $DIR/invalid_tag_format.rs:17:14
    |
-LL |         .tag("Simple resource registry")  // mixed case
+LL |         .tag("Simple resource registry") // mixed case
    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: tags must contain whitespace-separated words, each starting with a capital letter
@@ -20,7 +20,7 @@ LL |         .tag("Simple resource registry")  // mixed case
 error: tag format is invalid
   --> $DIR/invalid_tag_format.rs:23:14
    |
-LL |         .tag("registry")  // single lowercase word
+LL |         .tag("registry") // single lowercase word
    |              ^^^^^^^^^^
    |
    = help: tags must contain whitespace-separated words, each starting with a capital letter
@@ -29,7 +29,7 @@ LL |         .tag("registry")  // single lowercase word
 error: tag format is invalid
   --> $DIR/invalid_tag_format.rs:29:14
    |
-LL |         .tag("")  // empty string
+LL |         .tag("") // empty string
    |              ^^
    |
    = help: tags must contain whitespace-separated words, each starting with a capital letter
@@ -38,7 +38,7 @@ LL |         .tag("")  // empty string
 error: tag must be a string literal or const string
   --> $DIR/invalid_tag_format.rs:36:14
    |
-LL |         .tag(tag_name)  // variable, not string literal or const
+LL |         .tag(tag_name) // variable, not string literal or const
    |              ^^^^^^^^
    |
    = help: use a string literal like `.tag("Your Tag")` or a const string
@@ -46,7 +46,7 @@ LL |         .tag(tag_name)  // variable, not string literal or const
 error: tag format is invalid
   --> $DIR/invalid_tag_format.rs:42:14
    |
-LL |         .tag(INVALID_TAG)  // const with invalid format
+LL |         .tag(INVALID_TAG) // const with invalid format
    |              ^^^^^^^^^^^
    |
    = help: tags must contain whitespace-separated words, each starting with a capital letter

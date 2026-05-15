@@ -123,9 +123,7 @@ fn check_use_in_contract(cx: &rustc_lint::EarlyContext<'_>, item: &Item) {
 impl EarlyLintPass for De0103NoHttpTypesInContract {
     fn check_item(&mut self, cx: &rustc_lint::EarlyContext<'_>, item: &Item) {
         // Check use statements in file-based contract modules
-        if matches!(item.kind, ItemKind::Use(_))
-            && is_in_contract_module_ast(cx, item)
-        {
+        if matches!(item.kind, ItemKind::Use(_)) && is_in_contract_module_ast(cx, item) {
             check_use_in_contract(cx, item);
         }
     }

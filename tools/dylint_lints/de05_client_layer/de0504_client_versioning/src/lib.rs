@@ -100,15 +100,21 @@ fn is_system_module(cx: &EarlyContext<'_>, span: Span) -> bool {
     file_path.contains("modules/system/") || file_path.contains("modules\\system\\")
 }
 
-fn emit_lint(cx: &EarlyContext<'_>, span: Span, trait_name: &str, version: &lint_utils::VersionParts<'_>) {
-    let suggestion = if version.has_malformed_version() && !version.malformed_digits.starts_with('0') {
-        // Trailing digits without V prefix: suggest inserting V
-        // e.g., UsersInfoClient2 -> UsersInfoClientV2
-        format!("{}V{}", version.base, version.malformed_digits)
-    } else {
-        // No version, bare V, V0, or leading-zero digits: suggest appending V1 to base
-        format!("{}V1", version.base)
-    };
+fn emit_lint(
+    cx: &EarlyContext<'_>,
+    span: Span,
+    trait_name: &str,
+    version: &lint_utils::VersionParts<'_>,
+) {
+    let suggestion =
+        if version.has_malformed_version() && !version.malformed_digits.starts_with('0') {
+            // Trailing digits without V prefix: suggest inserting V
+            // e.g., UsersInfoClient2 -> UsersInfoClientV2
+            format!("{}V{}", version.base, version.malformed_digits)
+        } else {
+            // No version, bare V, V0, or leading-zero digits: suggest appending V1 to base
+            format!("{}V1", version.base)
+        };
 
     cx.span_lint(DE0504_CLIENT_VERSIONING, span, |diag| {
         diag.primary_message(format!(
@@ -130,11 +136,7 @@ mod tests {
     #[test]
     fn test_comment_annotations_match_stderr() {
         let ui_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
-        lint_utils::test_comment_annotations_match_stderr(
-            &ui_dir,
-            "DE0504",
-            "Client trait",
-        );
+        lint_utils::test_comment_annotations_match_stderr(&ui_dir, "DE0504", "Client trait");
     }
 
     // NOTE: Positive-case testing (lint fires on bad code) is covered by UI tests in ui/

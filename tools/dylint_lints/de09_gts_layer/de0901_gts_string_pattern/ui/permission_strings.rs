@@ -52,7 +52,7 @@ fn main() {
         .build();
 
     // Should NOT trigger DE0901 - wildcards are allowed in resolve_to_uuids() calls
-    let _resolver = MockResolver::default();
+    let _resolver = MockResolver;
     _resolver.resolve_to_uuids(&["gts.example.core.events.*".to_owned()]);
 }
 
@@ -65,16 +65,9 @@ impl MockResolver {
     }
 }
 
+#[derive(Default)]
 struct MockPermissionBuilder {
     resource_pattern: Option<String>,
-}
-
-impl Default for MockPermissionBuilder {
-    fn default() -> Self {
-        Self {
-            resource_pattern: None,
-        }
-    }
 }
 
 impl MockPermissionBuilder {

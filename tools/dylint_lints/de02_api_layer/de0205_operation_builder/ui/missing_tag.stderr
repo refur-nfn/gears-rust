@@ -1,8 +1,8 @@
 error: operation builder missing .tag() and .summary() calls
-  --> $DIR/missing_tag.rs:7:47
+  --> $DIR/missing_tag.rs:8:9
    |
-LL |     let router1: OperationBuilder<_, _, ()> = OperationBuilder::post("/resources")
-   |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |         OperationBuilder::post("/resources").operation_id("create_resource");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: add .tag("Your Tag") with properly formatted tag
    = note: tags must contain whitespace-separated words, each starting with a capital letter
@@ -10,10 +10,10 @@ LL |     let router1: OperationBuilder<_, _, ()> = OperationBuilder::post("/reso
    = note: `#[deny(de0205_operation_builder)]` on by default
 
 error: operation builder missing .tag() and .summary() calls
-  --> $DIR/missing_tag.rs:11:47
+  --> $DIR/missing_tag.rs:12:9
    |
-LL |     let router2: OperationBuilder<_, _, ()> = OperationBuilder::get("/resources/{id}")
-   |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |         OperationBuilder::get("/resources/{id}").operation_id("get_resource");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: add .tag("Your Tag") with properly formatted tag
    = note: tags must contain whitespace-separated words, each starting with a capital letter

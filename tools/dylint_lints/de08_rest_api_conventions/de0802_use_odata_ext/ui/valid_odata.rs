@@ -16,9 +16,11 @@ impl OperationBuilder {
         self
     }
     pub fn with_odata_filter<T>(self) -> Self {
+        let _ = std::any::type_name::<T>();
         self
     }
     pub fn with_odata_orderby<T>(self) -> Self {
+        let _ = std::any::type_name::<T>();
         self
     }
     pub fn with_odata_select(self) -> Self {

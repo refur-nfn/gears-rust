@@ -1,5 +1,5 @@
 error: direct sqlx import detected: `sqlx` (DE0706)
-  --> $DIR/bad_direct_sqlx.rs:7:1
+  --> $DIR/bad_direct_sqlx.rs:6:1
    |
 LL | use sqlx;
    | ^^^^^^^^^
@@ -9,7 +9,7 @@ LL | use sqlx;
    = note: `#[deny(de0706_no_direct_sqlx)]` on by default
 
 error: direct sqlx import detected: `sqlx::Error` (DE0706)
-  --> $DIR/bad_direct_sqlx.rs:10:1
+  --> $DIR/bad_direct_sqlx.rs:9:1
    |
 LL | use sqlx::Error;
    | ^^^^^^^^^^^^^^^^

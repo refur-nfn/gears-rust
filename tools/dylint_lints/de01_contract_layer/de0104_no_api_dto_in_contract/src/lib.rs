@@ -71,11 +71,10 @@ impl EarlyLintPass for De0104NoApiDtoInContract {
 
                 // Check if this is an api_dto attribute
                 // Handles: api_dto, modkit_macros::api_dto, ::modkit_macros::api_dto
-                let is_api_dto = match segments.as_slice() {
-                    ["api_dto"] => true,
-                    [.., "modkit_macros", "api_dto"] => true,
-                    _ => false,
-                };
+                let is_api_dto = matches!(
+                    segments.as_slice(),
+                    ["api_dto"] | [.., "modkit_macros", "api_dto"]
+                );
 
                 if is_api_dto {
                     cx.span_lint(DE0104_NO_API_DTO_IN_CONTRACT, attr.span, |diag| {

@@ -46,8 +46,11 @@ impl TryFrom<PlainData> for PlainOutput {
         if value.0 == 0 {
             // `inner` carries a real `.source()` chain (ParseIntError).
             let inner = parse_strict("not a number").unwrap_err();
-            // Should trigger DE1302 - to_string
-            return Err(MyErr { msg: inner.to_string(), source: None });
+            return Err(MyErr {
+                // Should trigger DE1302 - to_string
+                msg: inner.to_string(),
+                source: None,
+            });
         }
         Ok(PlainOutput(value.0))
     }
