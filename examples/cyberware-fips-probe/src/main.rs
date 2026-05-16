@@ -1,9 +1,10 @@
 //! cyberware-fips-probe — outbound HTTPS smoke for the modkit / modkit-http FIPS path.
 //!
 //! Boots the same crypto stack that cyberware-example-server uses (`modkit::bootstrap::
-//! init_crypto_provider` → corecrypto on macOS+fips, AWS-LC FIPS on
-//! Linux+fips, AWS-LC default otherwise), constructs a `modkit_http::HttpClient`,
-//! makes a single `GET` request, and prints what the server saw.
+//! init_crypto_provider` → corecrypto on macOS+fips, Windows CNG on
+//! Windows+fips, AWS-LC FIPS on Linux+fips, AWS-LC default otherwise),
+//! constructs a `modkit_http::HttpClient`, makes a single `GET` request,
+//! and prints what the server saw.
 //!
 //! When pointed at `https://www.howsmyssl.com/a/check` (default), the
 //! response JSON includes the negotiated TLS version, the selected cipher
@@ -65,7 +66,12 @@ async fn main() -> Result<()> {
         std::env::consts::OS,
         if cfg!(all(feature = "fips", target_os = "macos")) {
             "Apple corecrypto"
-        } else if cfg!(all(feature = "fips", not(target_os = "macos"))) {
+        } else if cfg!(all(feature = "fips", target_os = "windows")) {
+            "Windows CNG (FIPS-approved set)"
+        } else if cfg!(all(
+            feature = "fips",
+            not(any(target_os = "macos", target_os = "windows"))
+        )) {
             "AWS-LC FIPS"
         } else {
             "AWS-LC (default, non-FIPS)"

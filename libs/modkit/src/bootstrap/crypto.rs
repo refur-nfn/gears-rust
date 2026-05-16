@@ -10,6 +10,18 @@ pub enum CryptoProviderError {
     /// Another crypto provider was already installed (FIPS mode).
     #[error("failed to install FIPS crypto provider - another provider is already installed")]
     FipsProviderConflict,
+    /// Windows is not in FIPS mode — the system-wide Group Policy
+    /// `FipsAlgorithmPolicy` is not enabled, so CNG would not enforce the
+    /// FIPS-Approved algorithm subset at runtime. Fail-closed: refuse to
+    /// start rather than silently degrade the FIPS claim.
+    #[cfg(target_os = "windows")]
+    #[error(
+        "Windows is not in FIPS mode (HKLM\\System\\CurrentControlSet\\Control\\Lsa\\FipsAlgorithmPolicy != 1). \
+         Enable system-wide FIPS via Group Policy (Computer Configuration > Windows Settings > \
+         Security Settings > Local Policies > Security Options > 'System cryptography: Use FIPS \
+         compliant algorithms') and reboot before launching this service."
+    )]
+    SystemFipsModeNotEnabled,
 }
 
 static INIT_RESULT: OnceLock<Result<(), CryptoProviderError>> = OnceLock::new();
@@ -29,10 +41,19 @@ static INIT_RESULT: OnceLock<Result<(), CryptoProviderError>> = OnceLock::new();
 ///   the `cyberware-rustls-corecrypto-provider` README "FIPS claim boundaries"
 ///   section. On macOS the `rustls/fips` feature is not activated (see
 ///   `rustls-fips-shim`), so the AWS-LC FIPS dylib is not linked.
-/// - **`fips` feature + non-macOS** (Linux, etc.): installs the FIPS-validated
-///   AWS-LC provider (`aws-lc-fips-sys`, NIST Certificate #4816). The cert's OE
-///   covers Linux but not Darwin, which is why the macOS branch uses a
-///   different provider.
+/// - **`fips` feature + Windows**: installs the Windows CNG-backed provider
+///   from `rustls-cng-crypto`'s `fips_provider()`. CNG is shipped inside
+///   Windows and validated by Microsoft under FIPS 140-3 per OS release.
+///   Requires Windows to be in system-wide FIPS mode
+///   (`HKLM\System\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy = 1`,
+///   set via Group Policy); fails closed with
+///   [`CryptoProviderError::SystemFipsModeNotEnabled`] otherwise. As with
+///   macOS, `rustls/fips` is not activated on this target, so the AWS-LC
+///   FIPS dylib is not linked.
+/// - **`fips` feature + other** (Linux, etc.): installs the FIPS-validated
+///   AWS-LC provider (`aws-lc-fips-sys`, NIST Certificate #4816). The cert's
+///   OE covers Linux but not Darwin/Windows, which is why those targets use
+///   different providers.
 /// - **Standard mode** (no `fips` feature): installs the `aws-lc-rs` provider
 ///   explicitly. This is required because both `ring` and `aws-lc-rs` are
 ///   compiled into the binary (ring via `aliri`/`pingora-rustls`), and rustls
@@ -74,8 +95,10 @@ static INIT_RESULT: OnceLock<Result<(), CryptoProviderError>> = OnceLock::new();
 ///
 /// # Errors
 ///
-/// Returns [`CryptoProviderError::FipsProviderConflict`] if the `fips` feature
-/// is enabled and another rustls provider was installed first.
+/// - [`CryptoProviderError::FipsProviderConflict`] if the `fips` feature is
+///   enabled and another rustls provider was installed first.
+/// - [`CryptoProviderError::SystemFipsModeNotEnabled`] on Windows+`fips` when
+///   the OS is not in system-wide FIPS mode.
 pub fn init_crypto_provider() -> Result<(), CryptoProviderError> {
     INIT_RESULT
         .get_or_init(|| {
@@ -99,7 +122,37 @@ pub fn init_crypto_provider() -> Result<(), CryptoProviderError> {
                 tracing::info!("FIPS-140-3 crypto provider installed (Apple corecrypto, macOS, TLS 1.3-only)");
             }
 
-            #[cfg(all(feature = "fips", not(target_os = "macos")))]
+            #[cfg(all(feature = "fips", target_os = "windows"))]
+            {
+                // Fail-closed: when Windows is not in system-wide FIPS mode,
+                // `rustls_cng_crypto::fips_provider()` returns a CryptoProvider
+                // with empty `cipher_suites` / `kx_groups` (rustls's per-suite
+                // `.fips()` flag is the gate; in non-FIPS-mode Windows none
+                // qualify). The upstream crate's `fips::enabled()` helper is
+                // `pub(crate)`, so we detect the same condition via the
+                // documented empty-provider shape rather than poking
+                // `BCryptGetFipsAlgorithmMode` ourselves. Refuse to install
+                // rather than degrade the FIPS claim with a non-handshakeable
+                // provider.
+                let provider = rustls_cng_crypto::fips_provider();
+                if provider.cipher_suites.is_empty() {
+                    tracing::error!(
+                        "Windows FIPS mode not enabled (FipsAlgorithmPolicy != 1); \
+                         rustls-cng-crypto returned an empty FIPS provider"
+                    );
+                    return Err(CryptoProviderError::SystemFipsModeNotEnabled);
+                }
+                if let Err(prev) = provider.install_default() {
+                    tracing::error!(
+                        previous_provider = ?prev,
+                        "FIPS crypto provider conflict: another rustls provider was already installed"
+                    );
+                    return Err(CryptoProviderError::FipsProviderConflict);
+                }
+                tracing::info!("FIPS-140-3 crypto provider installed (Windows CNG)");
+            }
+
+            #[cfg(all(feature = "fips", not(any(target_os = "macos", target_os = "windows"))))]
             {
                 if let Err(prev) = rustls::crypto::default_fips_provider().install_default() {
                     tracing::error!(

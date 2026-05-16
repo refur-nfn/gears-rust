@@ -245,6 +245,9 @@ modkit-transport-grpc = { package = "cyberware-modkit-transport-grpc", version =
 modkit-utils = { package = "cyberware-modkit-utils", version = "0.6.3", path = "libs/modkit-utils" }
 rustls-corecrypto-provider = { package = "cyberware-rustls-corecrypto-provider", version = "0.1.0", path = "libs/rustls-corecrypto-provider" }
 rustls-fips-shim = { package = "cyberware-rustls-fips-shim", version = "0.1.0", path = "libs/rustls-fips-shim" }
+# Windows CNG-backed rustls CryptoProvider (Windows-only FIPS path). Caret-pinned to 0.1.x;
+# re-evaluate per release. See docs/security/fips/adrs/0003-windows-fips-via-rustls-cng-crypto.md.
+rustls-cng-crypto = { version = "0.1", default-features = false, features = ["fips"] }
 
 # PKCS#8 + SEC1 envelope parsing used by the macOS corecrypto provider's
 # server-side signer (cyberware-rustls-corecrypto-provider). These crates do

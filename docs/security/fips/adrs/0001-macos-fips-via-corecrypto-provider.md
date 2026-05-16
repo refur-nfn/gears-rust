@@ -33,9 +33,9 @@ decision-makers: cyberware core team
 
 ## Context and Problem Statement
 
-cyberware needs a FIPS 140-3 claim for outbound TLS on Linux, macOS, and (eventually) Windows. The existing `aws-lc-rs` FIPS v2 module is validated **only on Linux** (`x86_64` / `aarch64`); on macOS its Operational Environment does not apply. Continuing to use `aws-lc-rs/fips` on macOS would mean the binary ships FIPS-validated code that is **not** valid for the running OS — a defective claim.
+cyberware needs a FIPS 140-3 claim for outbound TLS on Linux, macOS, and Windows. The existing `aws-lc-rs` FIPS v2 module is validated **only on Linux** (`x86_64` / `aarch64`); on macOS its Operational Environment does not apply. Continuing to use `aws-lc-rs/fips` on macOS would mean the binary ships FIPS-validated code that is **not** valid for the running OS — a defective claim.
 
-Apple ships its own FIPS 140-3 validated module (`corecrypto`) inside macOS, validated per OS release. The question is **how to route rustls through corecrypto** on macOS while keeping a uniform rustls-based TLS stack on Linux and Windows.
+Apple ships its own FIPS 140-3 validated module (`corecrypto`) inside macOS, validated per OS release. The question is **how to route rustls through corecrypto** on macOS while keeping a uniform rustls-based TLS stack on Linux and Windows. Windows is addressed by a separate decision in ADR 0003.
 
 ## Decision Drivers
 
@@ -116,6 +116,7 @@ Justification:
 
 - **DESIGN**: [`libs/modkit/src/bootstrap/crypto.rs`](../../../../libs/modkit/src/bootstrap/crypto.rs), [`libs/modkit-http/src/tls.rs`](../../../../libs/modkit-http/src/tls.rs)
 - **Related ADR**: [`0002-fips-feature-target-conditional-shim`](0002-fips-feature-target-conditional-shim.md) — explains how the FIPS `Cargo` feature picks the corecrypto path on macOS without poisoning the build with aws-lc-fips.
+- **Related ADR**: [`0003-windows-fips-via-rustls-cng-crypto`](0003-windows-fips-via-rustls-cng-crypto.md) — symmetric decision for Windows, routing FIPS through CNG via `rustls-cng-crypto` instead of waiting for Microsoft's `rustls-symcrypt` CMVP validation.
 
 This decision directly addresses:
 

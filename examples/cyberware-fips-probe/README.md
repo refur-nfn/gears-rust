@@ -4,8 +4,9 @@ Outbound-HTTPS smoke for the modkit / modkit-http FIPS path.
 
 Boots the **same crypto stack** that `cyberware-example-server` uses
 (`modkit::bootstrap::init_crypto_provider` → corecrypto on macOS+fips,
-AWS-LC FIPS on Linux+fips, AWS-LC default otherwise), constructs a
-`modkit_http::HttpClient`, makes one `GET`, and prints what was negotiated.
+Windows CNG on Windows+fips, AWS-LC FIPS on Linux+fips, AWS-LC default
+otherwise), constructs a `modkit_http::HttpClient`, makes one `GET`, and
+prints what was negotiated.
 
 The point of this binary is to give you a **fast, copy-pasteable smoke** to
 verify a FIPS build end-to-end without spinning up cyberware-example-server or writing
@@ -201,11 +202,108 @@ No `libaws_lc_fips`, no `libcrypto`, no `libssl`, no `libring`.
   binary just gives you fast engineering-grade confidence that the build
   is wired correctly.
 - The probe verifies the **client** path. Server-side TLS is intentionally
-  unsupported in `cyberware-rustls-corecrypto-provider` (hyperspot terminates
+  unsupported in `cyberware-rustls-corecrypto-provider` (cyberware terminates
   HTTPS at the reverse proxy in production).
 - On macOS the FIPS claim is only valid for **macOS versions whose
   corecrypto cert covers the running OS** — verify the current cert at
   <https://csrc.nist.gov/projects/cryptographic-module-validation-program/validated-modules/search>.
+
+## Verify on Windows
+
+Windows handshake verification requires running on a real Windows host;
+the workspace `check-windows-fips` Makefile target only proves the build
+graph composes (cross-compile from Linux/macOS catches type / cfg /
+feature regressions but never executes Windows code).
+
+### Prerequisites
+
+1. **Enable Windows system-wide FIPS mode.** Group Policy path:
+
+   *Computer Configuration → Windows Settings → Security Settings →
+   Local Policies → Security Options → "System cryptography: Use FIPS
+   compliant algorithms for encryption, hashing, and signing" → Enabled*
+
+   Or directly via registry (admin shell):
+
+   ```powershell
+   reg add HKLM\System\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy /v Enabled /t REG_DWORD /d 1 /f
+   ```
+
+   **Reboot.** The CNG runtime only reads this flag at boot.
+
+2. **Confirm the flag** after reboot:
+
+   ```powershell
+   reg query HKLM\System\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy /v Enabled
+   ```
+
+   Expected: `Enabled    REG_DWORD    0x1`.
+
+### Positive smoke
+
+```powershell
+cargo run -p cyberware-fips-probe --features fips -- --url https://www.howsmyssl.com/a/check
+```
+
+Expected `[1]` step output:
+
+```
+[1] crypto provider installed
+    build profile: FIPS-enabled
+    target_os: windows -> Windows CNG (FIPS-approved set)
+```
+
+Expected wire-level (`given_cipher_suites`): only the six AES-GCM
+suites and `TLS_EMPTY_RENEGOTIATION_INFO_SCSV`; no ChaCha20.
+Expected `given_named_groups`: `secp256r1`, `secp384r1` only.
+Probe heuristic prints `[OK] No ChaCha20 in ClientHello cipher_suites`.
+
+### Negative test — fail-closed on FIPS-mode disabled
+
+Disable Windows FIPS mode:
+
+```powershell
+reg add HKLM\System\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy /v Enabled /t REG_DWORD /d 0 /f
+```
+
+Reboot, then rerun the probe:
+
+```powershell
+cargo run -p cyberware-fips-probe --features fips -- --url https://www.howsmyssl.com/a/check
+```
+
+Expected: process exits with an error containing
+`SystemFipsModeNotEnabled` and the Group-Policy remediation hint. The
+HTTP `GET` never executes — `init_crypto_provider` refuses before the
+client is built.
+
+This is the **fail-closed** path: rather than silently install a CNG
+provider that would route through non-Approved algorithms, the bootstrap
+refuses to start. Same posture as Microsoft documents in
+<https://learn.microsoft.com/en-us/windows/security/threat-protection/fips-140-validation>.
+
+### Linkage (Windows-specific)
+
+```powershell
+dumpbin /imports target\x86_64-pc-windows-msvc\debug\cyberware-fips-probe.exe | findstr /i "bcrypt ncrypt aws"
+```
+
+Expected: `bcrypt.dll` appears (CNG primitives: `BCryptGenRandom`,
+`BCryptGetFipsAlgorithmMode`, AES-GCM, ECDH, signature verify, hash,
+HMAC). `ncrypt.dll` is **not** expected — `rustls-cng-crypto` is a
+client-side TLS provider and uses BCrypt exclusively, not the NCrypt
+key-storage surface. **`libaws_lc_fips*.dll` must be absent** — if it
+appears, the `rustls-fips-shim` Windows exclusion has regressed.
+
+The same check from a Linux/macOS host that produced the cross-compiled
+binary, without `dumpbin`:
+
+```sh
+strings target/x86_64-pc-windows-msvc/debug/cyberware-fips-probe.exe \
+  | grep -iE '^(bcrypt|ncrypt|aws.?lc.?fips)\.dll$' | sort -u
+# expected output:
+# bcrypt.dll
+```
 
 ## Adding new verification cases
 

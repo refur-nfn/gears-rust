@@ -141,6 +141,11 @@ setup: .setup-stamp
 	@if echo "$$OS" | grep -iq windows || [ -n "$$COMSPEC" ]; then \
 		echo "WARNING: kani-verifier and cargo-llvm-cov installation skipped on Windows."; \
 		echo "These tools are not supported on Windows. Use WSL2 or Docker to install instead."; \
+		if ! command -v nasm >/dev/null 2>&1; then \
+			echo "Installing NASM (required by aws-lc-sys on Windows)..."; \
+			winget install NASM.NASM --accept-source-agreements --accept-package-agreements || \
+				echo "WARNING: NASM auto-install failed. Install manually from https://www.nasm.us/"; \
+		fi; \
 	else \
 		cargo install --locked kani-verifier && \
 		cargo kani setup && \
@@ -382,6 +387,34 @@ test-users-info-pg: install-tools
 ## Run FIPS-mode integration tests (cyberware-modkit, requires Go for aws-lc-fips-sys)
 test-fips: install-tools
 	cargo nextest run -p cyberware-modkit --features bootstrap,fips
+
+## Cross-compile gate for the Windows+FIPS path (Windows handshake
+## verification is the manual runbook in cyberware-fips-probe/README.md). Catches
+## type / cfg / feature-graph regressions for `rustls-cng-crypto` and the
+## dep-graph (`rustls-cng-crypto` present, `aws-lc-fips-sys` absent).
+##
+## Uses `cargo-xwin` because the workspace pulls transitive C deps
+## (`aws-lc-sys`, `libz-ng-sys`) whose build.rs scripts need a Windows
+## sysroot (`windows.h`, MSVC headers). `cargo-xwin` downloads the MSVC
+## redistributable and CRT/Windows headers automatically — works on Linux,
+## macOS, and Windows hosts without a pre-installed Visual Studio.
+##
+## Prerequisites:
+##   cargo install cargo-xwin    # MSVC sysroot bridge
+##   # And a cmake build driver for the cmake-based transitive C deps:
+##   # macOS:  brew install ninja
+##   # Linux:  apt-get install ninja-build  (or: dnf install ninja-build)
+##
+## Pair this with the dep-graph regression check, which needs no toolchain
+## at all and runs on any host:
+##   cargo tree --target x86_64-pc-windows-msvc -p cyberware-example-server \
+##       --features fips -e features | grep aws-lc-fips    # must be empty
+.PHONY: check-windows-fips
+check-windows-fips:
+	$(call check_tool,cargo-xwin)
+	$(call check_tool,ninja)
+	rustup target add x86_64-pc-windows-msvc
+	cargo xwin check --target x86_64-pc-windows-msvc -p cyberware-example-server --features fips
 
 # -------- Benchmarks --------
 
