@@ -898,14 +898,28 @@ single-item counterparts (per `cpt-cf-quota-enforcement-fr-authorization`,
 
 ### 5.3 Quota Type Semantics
 
+Each Quota carries a `quota_type` identifying its accounting model. P1 reserves three GTS instances under base
+`gts.cf.qe.quota.type.v1~`:
+
+- `gts.cf.qe.quota.type.v1~cf.qe.quota.allocation.v1` — in-flight reservable capacity (no period reset).
+- `gts.cf.qe.quota.type.v1~cf.qe.quota.consumption.v1` — per-period cumulative consumption (resets at the period
+  boundary).
+- `gts.cf.qe.quota.type.v1~cf.qe.quota.rate.v1` — P3 type; Quota creation is rejected in P1 with
+  `NOT_YET_IMPLEMENTED` per `cpt-cf-quota-enforcement-fr-quota-type-rate-rejection`.
+
+> **Notation.** Throughout this document, quota types are referenced by their short instance names (`allocation`,
+> `consumption`, `rate`) in examples and use-case payloads for readability. API requests, storage rows, and
+> outbox events use the full GTS URI form shown above.
+
 #### Allocation Quota Semantics
 
 - [ ] `p1` - **ID**: `cpt-cf-quota-enforcement-fr-quota-type-allocation`
 
 The system **MUST** support allocation-type Quotas that bound in-flight reservable capacity. An allocation Quota
-maintains a single counter representing currently-in-use capacity for that Quota; the counter increments on debit (or on
-lease commit) and decrements on credit (or on lease release). Allocation Quotas **MUST NOT** carry a period; the counter
-persists across calendar boundaries until explicitly modified by an operation.
+maintains a single counter representing currently-in-use capacity for that Quota. The counter increments on debit and
+on lease acquire (the lease reserves capacity for its TTL); it decrements on credit, on lease release / TTL
+auto-release, on rollback, and on lease commit by the unused `reserved − actual` portion. Allocation Quotas **MUST
+NOT** carry a period; the counter persists across calendar boundaries until explicitly modified by an operation.
 
 - **Rationale**: Allocation quotas model concurrent-use limits (e.g., maximum running VMs per tenant, maximum open file
   descriptors per user) where the cap is a point-in-time invariant rather than a per-period budget.
@@ -916,9 +930,11 @@ persists across calendar boundaries until explicitly modified by an operation.
 - [ ] `p1` - **ID**: `cpt-cf-quota-enforcement-fr-quota-type-consumption`
 
 The system **MUST** support consumption-type Quotas that bound cumulative consumption within a recurring time period. A
-consumption Quota maintains a per-period counter representing consumed amount within the current period; the counter
-increases on debit (or on lease commit) and decreases on credit. The counter **MUST** reset to zero at the period
-boundary per `cpt-cf-quota-enforcement-fr-period-rollover`.
+consumption Quota maintains a per-period counter representing consumed amount within the current period. The counter
+increases on debit and on lease acquire (the lease reserves capacity for its TTL, attributed to the acquisition period
+per `cpt-cf-quota-enforcement-fr-lease-commit` cross-period rules); it decreases on credit, on lease release / TTL
+auto-release, on rollback, and on lease commit by the unused `reserved − actual` portion. The counter **MUST** reset
+to zero at the period boundary per `cpt-cf-quota-enforcement-fr-period-rollover`.
 
 - **Rationale**: Consumption quotas model per-period budgets (e.g., 10 000 AI tokens per day, 1 TB egress per month)
   where the cap is the maximum amount consumable within a recurring window.
