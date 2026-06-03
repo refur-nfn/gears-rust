@@ -173,16 +173,26 @@ pub trait ResourceGroupClient: Send + Sync {
 
 // @cpt-dod:cpt-cf-resource-group-dod-integration-auth-read-service:p1
 /// Narrow read-only trait for group data, used by in-process plugin consumers
-/// (`AuthZ` resolver plugin, tenant-resolver RG plugin).
+/// (`AuthZ` resolver plugin, tenant-resolver RG plugin, and an in-process
+/// `AuthZ` PDP).
 ///
 /// Scope is deliberately "reads only": hierarchy walks anchored at a reference
-/// group (ancestors / descendants with depth) **and** flat OData-filtered group
-/// listing. Writes remain the responsibility of the full `ResourceGroupClient`.
+/// group (ancestors / descendants with depth), flat OData-filtered group
+/// listing, single-group existence lookup, and membership listing. Writes
+/// remain the responsibility of the full `ResourceGroupClient`.
 ///
 /// The listing method (`list_groups`) is what allows consumers to fetch several
 /// groups by id in a single round-trip (`id in (id1, id2, …)`), which is the
 /// batch read pattern the tenant-resolver RG plugin uses for
 /// `get_tenants(&[TenantId])`.
+///
+/// `get_group` and `list_memberships` back an in-process `AuthZ` PDP's
+/// scope-existence checks and group-membership resolution. Such a consumer
+/// invokes them while *being* the PDP, so — like the other reads here — they
+/// MUST bypass the `PolicyEnforcer`; routing them through it would re-enter the
+/// PDP and recurse. Implementations therefore resolve them unscoped (no tenant
+/// `AccessScope`); the caller supplies any subject/tenant `OData` filter and
+/// owns tenant scoping.
 #[async_trait]
 pub trait ResourceGroupReadHierarchy: Send + Sync {
     /// Get descendants of a reference group (depth >= 0).
@@ -212,4 +222,26 @@ pub trait ResourceGroupReadHierarchy: Send + Sync {
         ctx: &SecurityContext,
         query: &ODataQuery,
     ) -> Result<Page<ResourceGroup>, ResourceGroupError>;
+
+    /// Get a single resource group by ID (existence + tenant-ownership check).
+    ///
+    /// Backs PDP scope validation (`/tenants/{t}/resourceGroups/{rg}`): the
+    /// consumer reads the group and compares `tenant_id` itself. Resolved
+    /// unscoped — see the trait-level note.
+    async fn get_group(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<ResourceGroup, ResourceGroupError>;
+
+    /// List memberships with `OData` filtering and cursor-based pagination.
+    ///
+    /// Backs PDP group-membership resolution. The caller MUST supply a
+    /// subject-scoped filter (e.g. `resource_id eq '<subject_id>'`); omitting it
+    /// returns every membership row. Resolved unscoped — see the trait-level note.
+    async fn list_memberships(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<ResourceGroupMembership>, ResourceGroupError>;
 }

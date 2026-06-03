@@ -11,7 +11,8 @@ use resource_group_sdk::TENANT_RG_TYPE_PATH;
 use resource_group_sdk::api::ResourceGroupReadHierarchy;
 use resource_group_sdk::error::ResourceGroupError;
 use resource_group_sdk::models::{
-    GroupHierarchy, GroupHierarchyWithDepth, ResourceGroup, ResourceGroupWithDepth,
+    GroupHierarchy, GroupHierarchyWithDepth, ResourceGroup, ResourceGroupMembership,
+    ResourceGroupWithDepth,
 };
 use tenant_resolver_sdk::{
     BarrierMode, GetAncestorsOptions, GetDescendantsOptions, GetTenantsOptions, IsAncestorOptions,
@@ -173,6 +174,22 @@ impl ResourceGroupReadHierarchy for MockRgHierarchy {
                 limit: 100,
             },
         })
+    }
+
+    async fn get_group(
+        &self,
+        _ctx: &SecurityContext,
+        _id: Uuid,
+    ) -> Result<ResourceGroup, ResourceGroupError> {
+        unimplemented!("MockRgHierarchy models hierarchy reads only")
+    }
+
+    async fn list_memberships(
+        &self,
+        _ctx: &SecurityContext,
+        _query: &ODataQuery,
+    ) -> Result<Page<ResourceGroupMembership>, ResourceGroupError> {
+        unimplemented!("MockRgHierarchy models hierarchy reads only")
     }
 }
 
@@ -775,6 +792,22 @@ async fn rg_error_propagates() {
             _ctx: &SecurityContext,
             _query: &ODataQuery,
         ) -> Result<Page<ResourceGroup>, ResourceGroupError> {
+            Err(ResourceGroupError::internal())
+        }
+
+        async fn get_group(
+            &self,
+            _ctx: &SecurityContext,
+            _id: Uuid,
+        ) -> Result<ResourceGroup, ResourceGroupError> {
+            Err(ResourceGroupError::internal())
+        }
+
+        async fn list_memberships(
+            &self,
+            _ctx: &SecurityContext,
+            _query: &ODataQuery,
+        ) -> Result<Page<ResourceGroupMembership>, ResourceGroupError> {
             Err(ResourceGroupError::internal())
         }
     }

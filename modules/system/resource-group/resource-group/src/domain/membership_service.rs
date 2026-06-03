@@ -319,6 +319,22 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
         // @cpt-end:cpt-cf-resource-group-flow-membership-list:p1:inst-list-memb-3
         result
     }
+
+    /// List memberships without `AuthZ` enforcement (private API, no tenant scoping).
+    ///
+    /// **Internal API** — never expose this through a REST handler. Backs the
+    /// membership read (`ResourceGroupReadHierarchy::list_memberships`): an
+    /// in-process `AuthZ` PDP resolves a subject's group memberships while
+    /// *being* the PDP, so it cannot re-enter the `PolicyEnforcer` (would
+    /// recurse). Mirrors `add_membership_unscoped` — only the enforcer gate is
+    /// skipped; the caller supplies any subject/tenant `OData` filter.
+    pub async fn list_memberships_unscoped(
+        &self,
+        query: &ODataQuery,
+    ) -> Result<Page<ResourceGroupMembership>, DomainError> {
+        let conn = self.conn()?;
+        self.membership_repo.list_memberships(&conn, query).await
+    }
 }
 
 // -- MembershipAdder trait implementation for seeding --

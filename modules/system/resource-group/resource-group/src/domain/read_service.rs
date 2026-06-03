@@ -20,7 +20,7 @@ use modkit_odata::{ODataQuery, Page};
 use modkit_security::SecurityContext;
 use resource_group_sdk::ResourceGroupReadHierarchy;
 use resource_group_sdk::error::ResourceGroupError;
-use resource_group_sdk::models::{ResourceGroup, ResourceGroupWithDepth};
+use resource_group_sdk::models::{ResourceGroup, ResourceGroupMembership, ResourceGroupWithDepth};
 use uuid::Uuid;
 
 use crate::domain::group_service::GroupService;
@@ -41,7 +41,6 @@ pub struct RgReadService<
     MR: MembershipRepositoryTrait,
 > {
     group_service: Arc<GroupService<GR, TR>>,
-    #[allow(dead_code)]
     membership_service: Arc<MembershipService<GR, TR, MR>>,
 }
 
@@ -146,6 +145,34 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait, MR: MembershipRepository
         // the caller's tenant scope.
         self.group_service
             .list_groups_unscoped(query)
+            .await
+            .map_err(ResourceGroupError::from)
+    }
+
+    async fn get_group(
+        &self,
+        _ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<ResourceGroup, ResourceGroupError> {
+        // Bypass AuthZ — an in-process PDP consumes this for scope-existence
+        // checks while acting as the PDP, so it cannot re-enter the enforcer.
+        // The consumer reads the group and compares `tenant_id` itself.
+        self.group_service
+            .get_group_unscoped(id)
+            .await
+            .map_err(ResourceGroupError::from)
+    }
+
+    async fn list_memberships(
+        &self,
+        _ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<ResourceGroupMembership>, ResourceGroupError> {
+        // Bypass AuthZ — an in-process PDP resolves a subject's group
+        // memberships while acting as the PDP; re-entering the enforcer would
+        // recurse. The caller supplies the subject/tenant OData filter.
+        self.membership_service
+            .list_memberships_unscoped(query)
             .await
             .map_err(ResourceGroupError::from)
     }

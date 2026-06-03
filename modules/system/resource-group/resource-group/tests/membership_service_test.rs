@@ -531,3 +531,36 @@ async fn membership_list_empty() {
 
     assert!(page.items.is_empty(), "should be empty with no memberships");
 }
+
+/// `list_memberships_unscoped` returns membership rows with no caller context
+/// and no tenant scope — the AuthZ-bypassing read backing the in-process PDP
+/// membership contract. The caller supplies the OData filter (the PDP uses
+/// `resource_id eq <subject>`); here we assert the unfiltered listing returns
+/// the seeded membership.
+#[tokio::test]
+async fn list_memberships_unscoped_returns_rows_without_ctx() {
+    let db = test_db().await;
+    let type_svc = TypeService::new(db.clone(), Arc::new(TypeRepository));
+    let group_svc = make_group_service(db.clone());
+    let mbr_svc = make_membership_service(db.clone());
+
+    let tenant = Uuid::now_v7();
+    let ctx = make_ctx(tenant);
+
+    let member_type = create_root_type(&type_svc, "umbr").await;
+    let grp_type = create_type_with_memberships(&type_svc, "ugrp", &[&member_type.code]).await;
+    let group = common::create_root_group(&group_svc, &ctx, &grp_type.code, "UG1", tenant).await;
+    mbr_svc
+        .add_membership(&ctx, group.id, &member_type.code, "res-u")
+        .await
+        .expect("add membership");
+
+    let query = ODataQuery::default();
+    let page = mbr_svc
+        .list_memberships_unscoped(&query)
+        .await
+        .expect("list_memberships_unscoped returns rows");
+
+    let count = page.items.iter().filter(|m| m.group_id == group.id).count();
+    assert_eq!(count, 1, "seeded membership must be listed");
+}

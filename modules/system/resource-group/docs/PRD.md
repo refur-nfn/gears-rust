@@ -773,7 +773,7 @@ The module **MUST** expose a stable SDK trait (`ResourceGroupClient`) via Client
 
 **Actors**: `cpt-cf-resource-group-actor-authz-plugin-consumer`
 
-The module **MUST** expose a narrow hierarchy-only read contract (`ResourceGroupReadHierarchy`) via ClientHub for AuthZ plugins. This trait provides only hierarchy traversal — no memberships, no write operations. General consumers use `ResourceGroupClient` for both read and write operations.
+The module **MUST** expose a narrow read-only contract (`ResourceGroupReadHierarchy`) via ClientHub for in-process plugin consumers (AuthZ resolver plugin, tenant-resolver RG plugin, and an in-process AuthZ PDP). This trait provides hierarchy traversal, flat group listing, single-group existence lookup (`get_group`), and membership listing (`list_memberships`) — but no write operations. Its reads are resolved unscoped (they bypass `PolicyEnforcer`) so a consumer acting as the PDP does not re-enter policy evaluation. General consumers use `ResourceGroupClient` for both read and write operations.
 
 Both traits are backed by the same implementation, registered in ClientHub. Module gateway resolves configured provider and either serves from built-in data path or delegates to vendor-selected scoped plugin.
 

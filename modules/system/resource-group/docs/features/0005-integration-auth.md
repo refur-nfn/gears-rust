@@ -118,7 +118,7 @@ This feature bridges RG with the AuthZ ecosystem. The integration read port prov
 2. [x] - `p1` - Plugin invokes `list_group_depth(system_ctx, group_id, query)` - `inst-plugin-read-2`
 3. [x] - `p1` - `RgReadService` delegates to `GroupService` unscoped read methods (`AccessScope::allow_all()`) — no AuthZ evaluation - `inst-plugin-read-3`
 4. [x] - `p1` - `GroupService` executes the closure-table query against the RG database - `inst-plugin-read-4`
-5. [x] - `p1` - **RETURN** `Page<ResourceGroupWithDepth>` — hierarchy rows with `tenant_id` per group and `metadata` (including `self_managed`); the trait surface restricts the plugin to hierarchy-only operations - `inst-plugin-read-5`
+5. [x] - `p1` - **RETURN** `Page<ResourceGroupWithDepth>` — hierarchy rows with `tenant_id` per group and `metadata` (including `self_managed`); the same narrow trait also exposes `get_group`, `list_groups`, and `list_memberships` for single-group and membership reads, all resolved unscoped (bypassing `PolicyEnforcer`) - `inst-plugin-read-5`
 
 ### MTLS Request from AuthZ Plugin (`p2` — deferred, not implemented yet)
 
@@ -225,10 +225,14 @@ Not applicable. This feature configures authentication routing and integration r
 
 - [x] `p1` - **ID**: `cpt-cf-resource-group-dod-integration-auth-read-service`
 
-The system **MUST** implement an Integration Read Service that exposes `ResourceGroupReadHierarchy` via ClientHub for external consumers.
+The system **MUST** implement an Integration Read Service that exposes `ResourceGroupReadHierarchy` via ClientHub for in-process plugin consumers (AuthZ resolver plugin, tenant-resolver RG plugin, in-process AuthZ PDP).
 
 **Required behavior**:
 - Expose `list_group_depth(ctx, group_id, query)` returning `Page<ResourceGroupWithDepth>` with hierarchy data including `tenant_id` per group and `metadata` (including `self_managed` for applicable types)
+- Expose `get_group(ctx, id)` returning a single `ResourceGroup` for PDP scope-existence checks (`/tenants/{t}/resourceGroups/{rg}`); the consumer reads the group and compares `tenant_id` itself
+- Expose `list_memberships(ctx, query)` returning `Page<ResourceGroupMembership>` for PDP group-membership resolution; the caller MUST supply a subject-scoped filter (`resource_id eq '<subject_id>'`)
+- Expose `list_groups(ctx, query)` for flat OData-filtered batch reads (`id in (…)`)
+- These narrow-trait reads are resolved **unscoped** (bypass `PolicyEnforcer`): a consumer acting as the PDP must not route reads back through the PEP, which would re-enter and recurse
 - Responses are policy-agnostic: no AuthZ decisions, no SQL fragments, no constraint objects
 - Plugin gateway routing: resolve configured provider (built-in vs vendor-specific), delegate with SecurityContext passthrough
 - In-process mode (monolith): direct ClientHub call, no network auth needed
@@ -321,6 +325,8 @@ In-source `#[cfg(test)]` tests covering auth-mode decision and tenant-scope enfo
 ## 6. Acceptance Criteria
 
 - [x] AuthZ plugin resolves `dyn ResourceGroupReadHierarchy` from ClientHub and successfully calls `list_group_depth`
+- [x] In-process PDP resolves `dyn ResourceGroupReadHierarchy` and calls `get_group(ctx, id)` for scope-existence checks, resolved unscoped (no `PolicyEnforcer` re-entry)
+- [x] In-process PDP calls `list_memberships(ctx, query)` with a subject-scoped filter (`resource_id eq '<subject_id>'`) for group-membership resolution, resolved unscoped
 - [x] Integration read responses include `tenant_id` per group and `metadata` (including `self_managed`) but no AuthZ decision fields
 - [x] JWT request to any RG endpoint goes through AuthN → AuthZ (PolicyEnforcer) → AccessScope → SecureORM pipeline
 - [ ] _(p2 — deferred, not implemented yet)_ MTLS request to `/groups/{group_id}/hierarchy` bypasses AuthZ and returns hierarchy data
@@ -370,7 +376,7 @@ In-source `#[cfg(test)]` tests covering auth-mode decision and tenant-scope enfo
 |----|----------|--------|
 | TC-READ-01 | `list_group_depth` response | Contains `tenant_id` and `metadata` per group; no AuthZ decision fields |
 | TC-READ-02 | Plugin gateway with built-in provider configured | Routes to local persistence path |
-| TC-READ-03 | Plugin gateway with vendor-specific provider configured | Delegates to `ResourceGroupReadPluginClient` |
+| TC-READ-03 | Plugin gateway with vendor-specific provider configured | Delegates to the vendor's `dyn ResourceGroupReadHierarchy` implementation |
 
 ---
 

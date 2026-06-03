@@ -516,37 +516,44 @@ REST API field projection notes:
 
 Type list `$filter` fields: `code` (eq, ne, in).
 
-**Integration read API** (stable, two-tier trait hierarchy):
+**Integration read API** (stable):
 
-`ResourceGroupReadHierarchy` is a narrow hierarchy-only read contract used exclusively by AuthZ plugin. All other consumers use `ResourceGroupClient` which includes the same read operations plus full CRUD.
+`ResourceGroupReadHierarchy` is a narrow read-only contract for in-process plugin consumers — the AuthZ resolver plugin, the tenant-resolver RG plugin, and an in-process AuthZ PDP. It carries hierarchy walks (`get_group_descendants` / `get_group_ancestors`), flat OData-filtered group listing (`list_groups`), single-group existence lookup (`get_group`), and membership listing (`list_memberships`). All other consumers use `ResourceGroupClient`, which includes the same reads plus full CRUD.
+
+These reads are resolved **unscoped** — they bypass `PolicyEnforcer`. A consumer that *is* the PDP cannot route reads back through the PEP without re-entering and recursing into itself, so implementations resolve them with no tenant `AccessScope`; the caller supplies any subject/tenant `OData` filter and owns tenant scoping.
 
 | Trait | Method | Description |
 | ----- | ------ | ----------- |
-| `ResourceGroupReadHierarchy` | `list_group_depth(ctx, group_id, query)` | hierarchy traversal with relative `depth`; matches REST `GET /groups/{group_id}/hierarchy` — supports OData `$filter` (depth, type), cursor-based pagination (`cursor`, `limit`) |
+| `ResourceGroupReadHierarchy` | `get_group_descendants(ctx, group_id, query)` | descendant hierarchy walk (depth ≥ 0); matches REST `GET /groups/{group_id}/hierarchy` — OData `$filter` (depth, type), cursor-based pagination (`cursor`, `limit`) |
+| `ResourceGroupReadHierarchy` | `get_group_ancestors(ctx, group_id, query)` | ancestor hierarchy walk (depth ≤ 0); same shape as the descendant walk |
+| `ResourceGroupReadHierarchy` | `list_groups(ctx, query)` | flat OData-filtered group listing; enables batch reads (`id in (…)`) for the tenant-resolver RG plugin's `get_tenants(&[TenantId])` |
+| `ResourceGroupReadHierarchy` | `get_group(ctx, id)` | single-group existence + tenant-ownership lookup; backs PDP scope validation (`/tenants/{t}/resourceGroups/{rg}`) |
+| `ResourceGroupReadHierarchy` | `list_memberships(ctx, query)` | membership listing; backs PDP group-membership resolution. Caller MUST supply a subject-scoped filter (`resource_id eq '<subject_id>'`) |
 
 Integration read models reuse the same SDK structs defined above:
 
-- `list_group_depth` returns `Page<ResourceGroupWithDepth>` (matches REST `GroupWithDepthPage`)
-- `list_memberships` (on `ResourceGroupClient`) returns `Page<ResourceGroupMembership>` (matches REST `MembershipPage` — no `tenant_id`; tenant scope is available from group data the caller already has via `list_group_depth`)
+- `get_group_descendants` / `get_group_ancestors` return `Page<ResourceGroupWithDepth>` (matches REST `GroupWithDepthPage`); `list_groups` and `get_group` return `Page<ResourceGroup>` / `ResourceGroup`
+- `list_memberships` (on both `ResourceGroupClient` and `ResourceGroupReadHierarchy`) returns `Page<ResourceGroupMembership>` (matches REST `MembershipPage` — no `tenant_id`; tenant scope is available from group data the caller already has via the hierarchy reads)
 
 Integration read trait hierarchy (defined in `resource-group-sdk/src/api.rs`):
 
 | Trait | Extends | Methods | Used by |
 | ----- | ------- | ------- | ------- |
-| `ResourceGroupReadHierarchy` | — | `list_group_depth` | AuthZ plugin (hierarchy-only read) |
-| `ResourceGroupReadPluginClient` | `ResourceGroupReadHierarchy` | `list_memberships` | Vendor-specific plugin gateway |
+| `ResourceGroupReadHierarchy` | — | `get_group_descendants`, `get_group_ancestors`, `list_groups`, `get_group`, `list_memberships` (all unscoped / PEP-bypassing) | AuthZ resolver plugin, tenant-resolver RG plugin, in-process AuthZ PDP |
 | `ResourceGroupClient` | — | full CRUD (types, groups, memberships, hierarchy) | General consumers |
+
+> The previously planned two-tier split — a separate `ResourceGroupReadPluginClient` extending `ResourceGroupReadHierarchy` with `list_memberships` — was collapsed. `list_memberships` and `get_group` now live directly on `ResourceGroupReadHierarchy`, and the vendor-specific plugin gateway resolves `dyn ResourceGroupReadHierarchy`. A vendor backend replaces the registered `ResourceGroupReadHierarchy` implementation at module init rather than implementing a distinct plugin trait.
 
 ClientHub registration: single implementation (`RgService`), registered as both `dyn ResourceGroupClient` and `dyn ResourceGroupReadHierarchy`. AuthZ plugin resolves `dyn ResourceGroupReadHierarchy`, general consumers resolve `dyn ResourceGroupClient`.
 
 Plugin gateway routing notes:
 
 - `ResourceGroupClient` is the full read+write contract for type/entity/membership lifecycle and hierarchy queries (used by domain clients and general consumers)
-- `ResourceGroupReadHierarchy` is the narrow read-only contract for AuthZ plugin (hierarchy only)
+- `ResourceGroupReadHierarchy` is the narrow read-only contract for in-process plugin consumers (AuthZ resolver plugin, tenant-resolver RG plugin, in-process AuthZ PDP); its reads are resolved unscoped (bypass `PolicyEnforcer`)
 - both are registered in ClientHub backed by the same implementation
 - module service resolves configured provider:
   - built-in provider: serve reads from local RG persistence path
-  - vendor-specific provider: resolve plugin instance by configured vendor and delegate to `ResourceGroupReadPluginClient`
+  - vendor-specific provider: resolve plugin instance by configured vendor; the vendor's `dyn ResourceGroupReadHierarchy` implementation replaces the registered one at module init (there is no separate plugin trait)
 - plugin registration is scoped (GTS instance ID), same pattern as tenant-resolver/authz-resolver gateways
 - `SecurityContext` is forwarded without policy interpretation in gateway layer (including plugin path)
 
@@ -653,8 +660,8 @@ Client initialization: AuthZ plugin resolves `dyn ResourceGroupReadHierarchy` fr
 | ------------------------------------- | ------------------------------- | ------------------------------------------------------------- |
 | SQL database                          | SeaORM repositories             | durable canonical + closure storage                           |
 | AuthZ Resolver SDK                    | `PolicyEnforcer` / `AuthZResolverClient` | AuthZ evaluation for JWT-authenticated RG API requests (write + read) |
-| Vendor-specific RG backend (optional) | `ResourceGroupReadPluginClient` | alternative hierarchy/membership source for integration reads |
-| AuthZ plugin consumer (optional)      | `ResourceGroupReadHierarchy`    | read hierarchy context in PDP logic (narrow, hierarchy-only; in-process via `ClientHub` — `p1`; MTLS transport — `p2`, deferred / not implemented yet) |
+| Vendor-specific RG backend (optional) | `ResourceGroupReadHierarchy`    | alternative hierarchy/membership source for integration reads (vendor impl replaces the registered `ResourceGroupReadHierarchy` at module init) |
+| AuthZ plugin consumer (optional)      | `ResourceGroupReadHierarchy`    | read group context in PDP logic (narrow reads: hierarchy + listing + single-group + memberships, resolved unscoped; in-process via `ClientHub` — `p1`; MTLS transport — `p2`, deferred / not implemented yet) |
 | General consumers (optional)          | `ResourceGroupClient`           | full read+write access to types/entities/memberships/hierarchy |
 
 

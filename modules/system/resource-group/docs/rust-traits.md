@@ -192,37 +192,69 @@ pub trait ResourceGroupClient: Send + Sync {
 
 ## Integration Read Trait — `ResourceGroupReadHierarchy`
 
-Narrow hierarchy-only read contract used exclusively by AuthZ plugin.
+Narrow read-only contract for in-process plugin consumers — the AuthZ resolver
+plugin, the tenant-resolver RG plugin, and an in-process AuthZ PDP. Carries
+hierarchy walks, flat group listing, single-group existence lookup, and
+membership listing. All methods are resolved **unscoped** (they bypass
+`PolicyEnforcer`): a consumer that *is* the PDP cannot route reads back through
+the PEP without recursing. Writes remain on `ResourceGroupClient`.
 
 ```rust
-/// Used by AuthZ plugin — provides only hierarchy traversal, no memberships.
+/// Narrow reads for in-process plugin consumers (AuthZ resolver, tenant-resolver
+/// RG plugin, in-process AuthZ PDP). Resolved unscoped — bypasses PolicyEnforcer.
 #[async_trait]
 pub trait ResourceGroupReadHierarchy: Send + Sync {
-    /// Matches REST `GET /groups/{group_id}/hierarchy` with OData query.
-    async fn list_group_depth(
+    /// Descendants of a reference group (depth >= 0).
+    async fn get_group_descendants(
         &self,
         ctx: &SecurityContext,
         group_id: Uuid,
-        query: ListQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ResourceGroupWithDepth>, ResourceGroupError>;
-}
-```
 
-## Plugin Trait — `ResourceGroupReadPluginClient`
+    /// Ancestors of a reference group (depth <= 0).
+    async fn get_group_ancestors(
+        &self,
+        ctx: &SecurityContext,
+        group_id: Uuid,
+        query: &ODataQuery,
+    ) -> Result<Page<ResourceGroupWithDepth>, ResourceGroupError>;
 
-Gateway delegates to selected scoped plugin (vendor-specific provider path).
+    /// Flat OData-filtered group listing; enables batch reads (`id in (…)`).
+    async fn list_groups(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<ResourceGroup>, ResourceGroupError>;
 
-```rust
-/// Plugin hierarchy read contract. Extends `ResourceGroupReadHierarchy`.
-#[async_trait]
-pub trait ResourceGroupReadPluginClient: ResourceGroupReadHierarchy {
+    /// Single-group existence + tenant-ownership lookup. Backs PDP scope
+    /// validation (`/tenants/{t}/resourceGroups/{rg}`). Resolved unscoped.
+    async fn get_group(
+        &self,
+        ctx: &SecurityContext,
+        id: Uuid,
+    ) -> Result<ResourceGroup, ResourceGroupError>;
+
+    /// Membership listing. Backs PDP group-membership resolution; the caller
+    /// MUST supply a subject-scoped filter (`resource_id eq '<subject_id>'`).
+    /// Resolved unscoped.
     async fn list_memberships(
         &self,
         ctx: &SecurityContext,
-        query: ListQuery,
+        query: &ODataQuery,
     ) -> Result<Page<ResourceGroupMembership>, ResourceGroupError>;
 }
 ```
+
+## Plugin Trait — collapsed into `ResourceGroupReadHierarchy`
+
+The earlier two-tier design had a separate `ResourceGroupReadPluginClient`
+extending `ResourceGroupReadHierarchy` with `list_memberships`. The shipped SDK
+collapses this: `list_memberships` (and `get_group`) live directly on
+`ResourceGroupReadHierarchy`, and the vendor-specific plugin gateway resolves
+`dyn ResourceGroupReadHierarchy`. A vendor backend replaces the registered
+`ResourceGroupReadHierarchy` implementation at module init rather than
+implementing a distinct plugin trait.
 
 ## ClientHub Registration
 
@@ -256,9 +288,10 @@ let ctx = SecurityContext::builder()
     .subject_tenant_id(Uuid::parse_str("11111111-1111-1111-1111-111111111111")?)
     .build()?;
 
-// Hierarchy traversal — descendants
+// Hierarchy traversal — descendants (unscoped read)
+let query = ODataQuery::default(); // e.g. $filter "hierarchy/depth ge 0"
 let descendants = rg_hierarchy
-    .list_group_depth(&ctx, group_id, ListQuery::filter("hierarchy/depth ge 0"))
+    .get_group_descendants(&ctx, group_id, &query)
     .await?;
 
 // Full CRUD — create group
@@ -278,5 +311,4 @@ let group = rg
 | Trait | Methods | Consumers | ClientHub key |
 |-------|---------|-----------|---------------|
 | `ResourceGroupClient` | 14 (full CRUD: types, groups, memberships, hierarchy) | Domain services, Apps, Admins | `dyn ResourceGroupClient` |
-| `ResourceGroupReadHierarchy` | 1 (`list_group_depth`) | AuthZ plugin | `dyn ResourceGroupReadHierarchy` |
-| `ResourceGroupReadPluginClient` | 1 + inherited (`list_memberships` + `list_group_depth`) | Vendor-specific plugin gateway | Scoped plugin resolution |
+| `ResourceGroupReadHierarchy` | 5 (`get_group_descendants`, `get_group_ancestors`, `list_groups`, `get_group`, `list_memberships`; all unscoped / PEP-bypassing) | AuthZ resolver plugin, tenant-resolver RG plugin, in-process AuthZ PDP | `dyn ResourceGroupReadHierarchy` |

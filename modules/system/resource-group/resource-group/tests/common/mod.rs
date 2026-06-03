@@ -15,6 +15,7 @@ use authz_resolver_sdk::{
     AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
     EvaluationResponseContext, PolicyEnforcer,
     constraints::{Constraint, InPredicate, Predicate},
+    models::DenyReason,
 };
 use modkit_db::{
     ConnectOpts, DBProvider, DbError, connect_db, migration_runner::run_migrations_for_testing,
@@ -211,6 +212,33 @@ impl AuthZResolverClient for AllowAllAuthZ {
                     ))],
                 }],
                 deny_reason: None,
+            },
+        })
+    }
+}
+
+// -- DenyAll AuthZ mock --
+
+/// Enforcer that denies every request. Used to prove the unscoped reads bypass
+/// the `PolicyEnforcer`: a service wired with this enforcer would reject any
+/// scoped operation, so an unscoped read that still succeeds proves it never
+/// consulted AuthZ.
+struct DenyAllAuthZ;
+
+#[async_trait]
+impl AuthZResolverClient for DenyAllAuthZ {
+    async fn evaluate(
+        &self,
+        _request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, AuthZResolverError> {
+        Ok(EvaluationResponse {
+            decision: false,
+            context: EvaluationResponseContext {
+                constraints: vec![],
+                deny_reason: Some(DenyReason {
+                    error_code: "deny_all".to_owned(),
+                    details: Some("deny-all test enforcer".to_owned()),
+                }),
             },
         })
     }
@@ -458,6 +486,35 @@ pub fn make_membership_service(
     MembershipService::new(
         db,
         make_enforcer(),
+        Arc::new(GroupRepository),
+        Arc::new(TypeRepository),
+        Arc::new(MembershipRepository),
+    )
+}
+
+/// Build a `GroupService` wired with the deny-all enforcer. Scoped operations
+/// would be rejected; an unscoped read that still succeeds proves the AuthZ bypass.
+pub fn make_group_service_deny(
+    db: Arc<DBProvider<DbError>>,
+) -> GroupService<GroupRepository, TypeRepository> {
+    GroupService::new(
+        db,
+        QueryProfile::default(),
+        PolicyEnforcer::new(Arc::new(DenyAllAuthZ)),
+        Arc::new(GroupRepository),
+        Arc::new(TypeRepository),
+        make_types_registry(),
+    )
+}
+
+/// Build a `MembershipService` wired with the deny-all enforcer (see
+/// [`make_group_service_deny`]).
+pub fn make_membership_service_deny(
+    db: Arc<DBProvider<DbError>>,
+) -> MembershipService<GroupRepository, TypeRepository, MembershipRepository> {
+    MembershipService::new(
+        db,
+        PolicyEnforcer::new(Arc::new(DenyAllAuthZ)),
         Arc::new(GroupRepository),
         Arc::new(TypeRepository),
         Arc::new(MembershipRepository),

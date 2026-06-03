@@ -2681,3 +2681,46 @@ async fn tenant_root_self_update_allowed() {
         .expect("self-update of the only tenant root must succeed");
     assert_eq!(updated.name, "RootB");
 }
+
+/// `get_group_unscoped` resolves a group by id with no caller context and no
+/// tenant scope — the AuthZ-bypassing read backing the in-process PDP
+/// membership contract. Returns the group regardless of which tenant owns it.
+#[tokio::test]
+async fn get_group_unscoped_returns_group_without_ctx() {
+    let db = common::test_db().await;
+    let type_svc = cyberware_resource_group::domain::type_service::TypeService::new(
+        db.clone(),
+        Arc::new(TypeRepository),
+    );
+    let group_svc = common::make_group_service(db.clone());
+    let tenant_id = Uuid::now_v7();
+    let ctx = common::make_ctx(tenant_id);
+
+    let root_type = common::create_root_type(&type_svc, "unscopedget").await;
+    let group =
+        common::create_root_group(&group_svc, &ctx, &root_type.code, "UnscopedGet", tenant_id)
+            .await;
+
+    let loaded = group_svc
+        .get_group_unscoped(group.id)
+        .await
+        .expect("get_group_unscoped returns the group");
+    assert_eq!(loaded.id, group.id);
+    assert_eq!(loaded.hierarchy.tenant_id, tenant_id);
+}
+
+/// `get_group_unscoped` surfaces `GroupNotFound` for an absent id.
+#[tokio::test]
+async fn get_group_unscoped_missing_is_not_found() {
+    let db = common::test_db().await;
+    let group_svc = common::make_group_service(db.clone());
+
+    let err = group_svc
+        .get_group_unscoped(Uuid::now_v7())
+        .await
+        .expect_err("absent group -> NotFound");
+    assert!(
+        matches!(err, DomainError::GroupNotFound { .. }),
+        "expected GroupNotFound, got: {err:?}"
+    );
+}
