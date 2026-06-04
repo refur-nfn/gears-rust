@@ -223,8 +223,23 @@ class TestWebSearchUsageAccounting:
         after_td = _find_period(after["tiers"], "total", "daily")
         spent_after = after_td["used_credits_micro"]
 
-        # Credits should increase (message was processed)
-        assert spent_after > spent_before
+        # Credits should increase (message was processed). Compare
+        # within the same period — if the daily bucket rolled over
+        # between the `before` and `after` snapshots the counter
+        # resets and a naive `>` fails. Fall back to verifying the
+        # SSE done event reported non-zero usage when the daily
+        # counter appears to have rolled.
+        sse_usage = done.data.get("usage", {})
+        if spent_after < spent_before:
+            # Period rolled over; verify via SSE usage instead.
+            assert spent_after > 0, (
+                "Daily quota rolled over but after-snapshot shows zero credits"
+            )
+            assert (sse_usage.get("input_tokens", 0) + sse_usage.get("output_tokens", 0)) > 0, (
+                "Period rollover: SSE done event must still report non-zero token usage"
+            )
+        else:
+            assert spent_after > spent_before
 
         # Verify no tool events (no web search happened)
         tool_events = [e for e in events if e.event == "tool"]
