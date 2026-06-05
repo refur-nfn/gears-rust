@@ -13,7 +13,7 @@
 
 /// Lazy accessor for the `tenant_type.v1~` envelope JSON Schema.
 ///
-/// Returned as a `String` per [`modkit_gts::InventorySchema::schema_fn`]'s
+/// Returned as a `String` per [`modkit_gts::InventoryTypeSchema::schema_fn`]'s
 /// contract. Mirrors
 /// `modules/system/account-management/docs/schemas/tenant_type.v1.schema.json`
 /// with the addition of `x-gts-traits` defaults on the envelope itself
@@ -86,15 +86,15 @@ fn tenant_metadata_envelope_schema() -> String {
 }
 
 modkit_gts::inventory::submit! {
-    modkit_gts::InventorySchema {
-        schema_id: "gts.cf.core.am.tenant_type.v1~",
+    modkit_gts::InventoryTypeSchema {
+        type_id: "gts.cf.core.am.tenant_type.v1~",
         schema_fn: tenant_type_envelope_schema,
     }
 }
 
 modkit_gts::inventory::submit! {
-    modkit_gts::InventorySchema {
-        schema_id: "gts.cf.core.am.tenant_metadata.v1~",
+    modkit_gts::InventoryTypeSchema {
+        type_id: "gts.cf.core.am.tenant_metadata.v1~",
         schema_fn: tenant_metadata_envelope_schema,
     }
 }
@@ -127,9 +127,9 @@ mod sync_tests {
             .unwrap_or_else(|err| panic!("parse {} as JSON: {err}", path.display()))
     }
 
-    fn parse_inline(body: &str, schema_id: &str) -> Value {
+    fn parse_inline(body: &str, type_id: &str) -> Value {
         serde_json::from_str(body)
-            .unwrap_or_else(|err| panic!("parse inline body for {schema_id} as JSON: {err}"))
+            .unwrap_or_else(|err| panic!("parse inline body for {type_id} as JSON: {err}"))
     }
 
     /// Remove the inline-only `x-gts-traits` defaults block so the
