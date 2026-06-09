@@ -56,6 +56,17 @@ LOCAL_COVERAGE_SKIPPED_TESTS = [
     "pg_stale_closure_classifier_detects_dangling_descendant",
 ]
 
+def append_local_coverage_features(cmd, include_server_features=True):
+    if not include_server_features:
+        return
+    if E2E_SERVER_FEATURES:
+        features = ",".join(
+            f"cf-gears-example-server/{feature.strip()}"
+            for feature in E2E_SERVER_FEATURES.split(",")
+            if feature.strip()
+        )
+        cmd.extend(["--features", features])
+
 FILE_PATH_COL_WIDTH = 70
 COVERAGE_CELL_COL_WIDTH = 18
 SEPARATOR_WIDTH = FILE_PATH_COL_WIDTH + COVERAGE_CELL_COL_WIDTH * 3
@@ -603,6 +614,7 @@ def collect_unit_coverage(
     cmd = ["cargo", "llvm-cov"]
 
     # Add package filter if provided, otherwise use workspace
+    include_server_features = test_filter is None
     if test_filter:
         cmd.extend(["--package", test_filter])
         print(f"Filtering tests: package={test_filter}")
@@ -612,7 +624,8 @@ def collect_unit_coverage(
     # Note: --branch flag requires nightly Rust and is unstable
     # Branch coverage will be 0 without it, but region coverage
     # provides good coverage metrics for Rust code
-    cmd.extend(["--all-features", "--no-report"])
+    append_local_coverage_features(cmd, include_server_features)
+    cmd.append("--no-report")
 
     # Keep local coverage independent from Docker-backed integration tests.
     cmd.append("--")
@@ -1135,10 +1148,9 @@ def cmd_coverage_combined(args):
     unit_cmd = [
         "cargo", "llvm-cov",
         "--workspace",
-        "--all-features",
-        "--no-report",
-        "--",
     ]
+    append_local_coverage_features(unit_cmd)
+    unit_cmd.extend(["--no-report", "--"])
     for test_name in LOCAL_COVERAGE_SKIPPED_TESTS:
         unit_cmd.extend(["--skip", test_name])
 
