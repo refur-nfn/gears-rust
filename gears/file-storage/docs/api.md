@@ -30,7 +30,7 @@ Encoding conventions:
 
 ## P1 — Auth-required
 
-```
+```text
 1.  POST   /files                              create   (multipart: metadata required + content required)
 2.  PATCH  /files/{id}[?replace_content=true]  update   (multipart: metadata optional; content only with ?replace_content=true) — If-Match
 3.  GET    /files/{id}                         download content                                              — If-Match, If-None-Match, Range
@@ -43,7 +43,7 @@ Encoding conventions:
 
 ## P2 — Multipart upload (declared, not implemented in P1)
 
-```
+```text
 9.  POST   /files/multipart                                      initiate (JSON metadata); returns {file_id, upload_id, etag}; creates pending file
 10. POST   /files/{id}/multipart/{upload_id}/parts/{n}           upload one part (binary body)                                — If-Match
 11. POST   /files/{id}/multipart/{upload_id}/complete            finalize; transitions file to available                     — If-Match
@@ -53,7 +53,7 @@ Encoding conventions:
 
 ## P2 — Versioning (when backend declares `versioning_native`)
 
-```
+```text
 14. GET    /files/{id}/versions                                  list versions
 15. GET    /files/{id}/versions/{version_id}                     download specific version                                    — If-Match, If-None-Match, Range
 16. HEAD   /files/{id}/versions/{version_id}                     version metadata headers                                     — If-Match, If-None-Match
@@ -96,7 +96,7 @@ The flag exists to prevent **silent content mutation**: a client (generic proxy,
 
 ## Response headers (download + HEAD)
 
-```
+```text
 ETag: "<opaque>"
 Content-Type: <mime>
 Content-Length: <bytes>             # full file on HEAD/200; range bytes on 206

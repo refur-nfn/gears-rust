@@ -264,8 +264,8 @@ their credentials requires a restart. Runtime/DB-driven configuration with admin
 
 - `File` → `OwnerPrincipal` (composition; immutable except via P2 ownership transfer)
 - `File` → `CustomMetadata` (1:N; cascade-deleted with the file)
-- `File` → `BackendConfig` (reference by `backend_id`; immutable per file **in P1**, relaxed by
-  `cpt-cf-file-storage-component-backend-migrator` in P2/P3 — until then the backend that wrote the bytes also owns the
+- `File` → `BackendConfig` (reference by `backend_id`; immutable per file **in P1**, relaxed by the
+  `backend-migrator` component (P2/P3; see PRD `cpt-cf-file-storage-fr-backend-migration`) — until then the backend that wrote the bytes also owns the
   version chain when versioning is on. Immutability is enforced at the service layer only, **not** as a DB constraint,
   so a future migrator can relocate non-versioned files without a schema change)
 - `ETag` ← derived from `File.content_revision`
@@ -1065,7 +1065,7 @@ include BLAKE3 and XXH3 without any wire-format change.
 
 **ETag derivation.** The ETag is opaque and content-derived:
 
-```
+```text
 etag_payload = file_id_bytes (16 bytes) || content_revision_u64_le (8 bytes)   # 24 bytes total
 etag_header  = '"' || base64url(etag_payload)[0..22] || '"'                     # 22 base64url chars (no padding)
 ```
