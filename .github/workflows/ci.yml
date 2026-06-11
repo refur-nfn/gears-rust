@@ -26,8 +26,64 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # Fast clippy: ubuntu only, 2-pass strategy (~5-6 min vs 30-40 min before).
+  # Linting output is platform-independent; platform-specific paths (fips) are
+  # covered by the test-fips job. Full feature matrix runs nightly (clippy-nightly.yml).
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C debuginfo=0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Go (required for aws-lc-fips-sys FIPS build)
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.21.x'  # pinned - see docs/security/fips/TOOLCHAIN.md
+          cache: false
+
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup show
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3
+        with:
+          tool: cargo-hack
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          cache-bin: false
+          cache-targets: false
+          shared-key: pr-clippy-stable-1.95
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      - name: Probe sccache & set RUSTC_WRAPPER
+        shell: bash
+        run: |
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "sccache failed, falling back to plain rustc"
+          fi
+
+      - name: cargo clippy
+        run: make clippy
+
   test:
-    name: Lint + Test Suite (${{ matrix.os }})
+    name: Test Suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -65,10 +121,10 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup show
 
-      - name: Install nextest and cargo-hack
+      - name: Install nextest
         uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3
         with:
-          tool: nextest,cargo-hack
+          tool: nextest
 
       # Cache Cargo registry/git + target/ across platforms.
       - name: Cache Cargo/target
@@ -92,9 +148,6 @@ jobs:
           else
             echo "sccache failed, falling back to plain rustc"
           fi
-
-      - name: cargo clippy
-        run: make clippy
 
       - name: cargo test (no macros)
         run: make test-no-macros

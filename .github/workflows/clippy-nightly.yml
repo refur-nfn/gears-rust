@@ -1,0 +1,79 @@
+name: Clippy (full feature matrix)
+
+# Full cargo-hack --each-feature run across the entire workspace.
+# ~182 runs, ~30-40 min. Not suitable for PRs; runs nightly and on every
+# push to main so regressions are caught before they accumulate.
+#
+# To manually trigger: Actions → Clippy (full feature matrix) → Run workflow.
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 02:00 UTC daily
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: clippy-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  clippy-deep:
+    name: Clippy deep (all features × all crates)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C debuginfo=0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Go (required for aws-lc-fips-sys FIPS build)
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.21.x'
+          cache: false
+
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup show
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3
+        with:
+          tool: cargo-hack
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          cache-bin: false
+          cache-targets: false
+          shared-key: nightly-clippy-stable-1.95
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      - name: Probe sccache & set RUSTC_WRAPPER
+        shell: bash
+        run: |
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          else
+            echo "sccache failed, falling back to plain rustc"
+          fi
+
+      - name: cargo clippy (full feature matrix)
+        run: make clippy-deep

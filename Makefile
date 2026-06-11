@@ -215,16 +215,36 @@ validate-gear-names:
 # |             | - Use 'make dylint-list' to see all available custom lints           |
 # +-------------+----------------------------------------------------------------------+
 
-.PHONY: clippy lychee kani geiger safety lint dylint dylint-list dylint-test gts-docs cypilot-validate cypilot-spec-coverage
+.PHONY: clippy clippy-deep lychee kani geiger safety lint dylint dylint-list dylint-test gts-docs cypilot-validate cypilot-spec-coverage
 
-# Run clippy via cargo-hack with `--each-feature`: one pass per individual
-# feature, plus a `--no-default-features` pass and an `--all-features` pass.
-# This ensures mutually exclusive cfg branches (e.g. `fips`/`not(fips)`) are
-# both visited — see GH issue #1574.
+# Fast two-pass clippy used in PR CI (target: <5 min with sccache).
+#
+# Pass 1 — one workspace-wide all-features run.
+#   Covers every crate, every target, every additive feature combination.
+#   80+ "leaf" crates (gears, plugins, SDKs) use `dep:` guards only, so
+#   --all-features is sufficient — no --each-feature needed.
+#
+# Pass 2 — cargo-hack --each-feature on the three crates with real
+#   #[cfg(feature = "...")] guards (mutually-exclusive DB backends, otel,
+#   fips, db). These account for >95% of all cfg-gated lines in the repo.
+#   See GH issue #1574 for original motivation.
+#
+# Use `make clippy-deep` for the full 182-run matrix (nightly / pre-release).
+CLIPPY_FLAGS := -- -D warnings -D clippy::perf
+CLIPPY_HACK_CRATES := -p cf-gears-toolkit -p cf-gears-toolkit-db -p cf-gears-toolkit-http
+
 clippy:
 	$(call check_rustup_component,clippy)
 	$(call check_tool,cargo-hack)
-	cargo hack clippy --workspace --all-targets --each-feature -- -D warnings -D clippy::perf
+	cargo clippy --workspace --all-targets --all-features $(CLIPPY_FLAGS)
+	cargo hack clippy $(CLIPPY_HACK_CRATES) --all-targets --each-feature $(CLIPPY_FLAGS)
+
+# Full feature-matrix clippy: one pass per (crate × feature).
+# ~182 runs — intended for nightly CI and pre-release validation, not PRs.
+clippy-deep:
+	$(call check_rustup_component,clippy)
+	$(call check_tool,cargo-hack)
+	cargo hack clippy --workspace --all-targets --each-feature $(CLIPPY_FLAGS)
 
 # Check cypilot spec-to-code traceability coverage
 cypilot-spec-coverage:
