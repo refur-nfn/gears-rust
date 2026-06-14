@@ -19,7 +19,18 @@ path = "src/lib.rs"
 [features]
 # FIPS-140-3: compile TLS deps with FIPS-approved cipher suites only
 fips = ["toolkit-http/fips"]
-test-utils = ["axum/ws", "toolkit/bootstrap", "dep:async-stream", "dep:futures", "dep:tower", "dep:rustls", "dep:rustls-pki-types", "dep:rcgen", "tokio/net", "tokio/sync", "tokio/rt"]
+test-utils = [
+    "axum/ws",
+    "toolkit/bootstrap",
+    "dep:async-stream",
+    "dep:tower",
+    "dep:rustls",
+    "dep:rustls-pki-types",
+    "dep:rcgen",
+    "tokio/net",
+    "tokio/sync",
+    "tokio/rt",
+]
 
 [dependencies]
 oagw-sdk = { path = "../oagw-sdk", package="cf-gears-oagw-sdk", version = "0.5.2", features = ["axum"] }
@@ -71,7 +82,6 @@ pingora-http = { version = "0.8.1" }
 httparse = "1"
 # test-utils optional deps
 async-stream = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
 tower = { workspace = true, features = ["util"], optional = true }
 rustls = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }

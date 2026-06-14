@@ -27,14 +27,9 @@ types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.2.3
 # ToolKit dependencies
 toolkit = { workspace = true }
 toolkit-macros = { workspace = true }
-toolkit-security = { workspace = true }
 
 # Async runtime
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
-
-# Data types
-uuid = { workspace = true }
 
 # Error handling and serialization
 anyhow = { workspace = true }

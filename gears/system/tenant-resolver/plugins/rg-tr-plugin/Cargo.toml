@@ -31,7 +31,6 @@ toolkit-odata = { workspace = true }
 
 # Async runtime
 async-trait = { workspace = true }
-futures = { workspace = true }
 
 # Data structures
 uuid = { workspace = true }

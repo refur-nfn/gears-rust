@@ -26,7 +26,6 @@ resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.1.5
 # Core dependencies
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 
@@ -70,7 +69,7 @@ toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 toolkit-macros = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite"] }
 tower = { workspace = true }
 http-body-util = { workspace = true }

@@ -24,7 +24,6 @@ serde = { workspace = true }
 postcard = { workspace = true }
 secrecy = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

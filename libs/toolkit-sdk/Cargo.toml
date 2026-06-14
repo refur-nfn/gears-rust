@@ -21,7 +21,6 @@ workspace = true
 [features]
 default = []
 derive = ["dep:toolkit-odata-macros"]
-chrono = ["dep:chrono"]
 
 [dependencies]
 # Project-local crates
@@ -35,10 +34,8 @@ pin-project-lite = { workspace = true }
 
 # Optional feature dependencies
 uuid = { workspace = true, features = ["v7"], optional = true }
-chrono = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 futures-util = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
-chrono = { workspace = true }

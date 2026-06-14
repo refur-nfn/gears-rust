@@ -28,7 +28,6 @@ schemars = { workspace = true }
 
 # GTS types
 gts = { workspace = true }
-gts-macros = { workspace = true }
 toolkit-gts = { workspace = true }
 
 # ToolKit dependencies

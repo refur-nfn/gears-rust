@@ -215,7 +215,7 @@ validate-gear-names:
 # |             | - Use 'make dylint-list' to see all available custom lints           |
 # +-------------+----------------------------------------------------------------------+
 
-.PHONY: clippy clippy-deep lychee kani geiger safety lint dylint dylint-list dylint-test gts-docs cypilot-validate cypilot-spec-coverage
+.PHONY: clippy clippy-deep lychee kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cypilot-validate cypilot-spec-coverage
 
 # Fast two-pass clippy used in PR CI (target: <5 min with sccache).
 #
@@ -311,6 +311,12 @@ dylint:
 	$(call check_tool,cargo-dylint)
 	$(call check_tool,dylint-link)
 	cargo dylint --all --workspace
+
+# Check for unused dependencies with cargo-shear.
+shear:
+	$(call check_tool,cargo-shear)
+	cargo +nightly-2026-04-16 shear --expand --deny-warnings
+	cd tools/dylint_lints && cargo shear --expand --deny-warnings
 
 # Run all code safety checks
 safety: clippy kani lint dylint # geiger

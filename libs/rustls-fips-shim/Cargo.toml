@@ -15,6 +15,12 @@ metadata.docs.rs.all-features = true
 name = "rustls_fips_shim"
 path = "src/lib.rs"
 
+# These deps are intentionally never referenced in code; they exist solely so
+# Cargo feature unification ORs the `fips` feature into the workspace's
+# `rustls`/`hyper-rustls`. See the target-deps comment below.
+[package.metadata.cargo-shear]
+ignored = ["rustls", "hyper-rustls"]
+
 [lints]
 workspace = true
 

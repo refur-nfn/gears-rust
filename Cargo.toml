@@ -318,7 +318,6 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 tracing-log = "0.2"
 tracing-opentelemetry = "0.32"
-tracing-error = "0.2"
 tracing-appender = "0.2"
 tracing-test = "0.2"
 opentelemetry = { version = "0.31", features = ["trace", "metrics"] }
@@ -435,7 +434,6 @@ regex = "1.10"
 
 # CLI and terminal output
 glob = "0.3"
-colored = "3.1"
 supports-color = "3"
 enable-ansi-support = "0.3"
 
@@ -445,7 +443,6 @@ prost = { version = "0.14" }
 tonic-prost = "0.14"
 
 # Protocol buffer compilation (build dependencies)
-prost-build = "0.14"
 tonic-prost-build = "0.14"
 
 # Blocking HTTP client (for build scripts)
@@ -464,7 +461,6 @@ jsonwebtoken = { version = "10.3", default-features = false, features = ["aws_lc
 # Configuration management
 figment = { version = "0.10", features = ["yaml", "env"] }
 inventory = "0.3"
-const_format = "0.2"
 
 # File system utilities
 tempfile = "3"
@@ -540,26 +536,20 @@ docx-rust = "0.1.11"
 kreuzberg = { version = "=4.9.7", features = ["html", "excel", "office", "pdf", "bundled-pdfium"] }
 
 # Additional testing utilities
-tokio-test = "0.4"
 temp-env = { version = "0.3", features = ["async_closure"] }
 
 # Additional utilities
 nanoid = "0.4"
 fnv = "1.0"
 
-# Metrics
-tokio-metrics = { version = "0.5", features = ["rt"] }
-
 # GTS dependencies
 jsonschema = { version = "0.40", default-features = false }
 walkdir = "2.5"
-shellexpand = "3.1"
 
 # GTS library
 gts-id = "0.10.0"
 gts = "0.10.0"
 gts-macros = "0.10.0"
 
-# GTS validator
-gts-validator = "0.10.0"
-
+[workspace.metadata.cargo-shear]
+ignored-paths = ["**/tests/ui/**"]

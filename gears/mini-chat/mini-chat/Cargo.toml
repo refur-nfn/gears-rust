@@ -48,7 +48,6 @@ inventory = { workspace = true }
 
 # Streaming / async utilities
 tokio-util = { workspace = true }
-pin-project-lite = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
 regex = { workspace = true }
@@ -98,7 +97,6 @@ toolkit-db-macros = { workspace = true }
 toolkit-security = { workspace = true }
 toolkit-macros = { workspace = true }
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
-toolkit-utils = { workspace = true }
 heck = { workspace = true }
 secrecy = { workspace = true }
 # k8s leader election (optional, behind k8s feature)

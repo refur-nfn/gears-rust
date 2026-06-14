@@ -571,7 +571,6 @@ dependencies = [
  "futures-core",
  "futures-util",
  "gts",
- "gts-macros",
  "http",
  "inventory",
  "nix 0.31.2",
@@ -580,7 +579,6 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "rustls",
- "schemars",
  "sea-orm-migration",
  "serde",
  "serde_json",
@@ -680,7 +678,6 @@ dependencies = [
 name = "cf-gears-toolkit-gts-macros"
 version = "0.1.1"
 dependencies = [
- "gts-macros",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
@@ -707,12 +704,10 @@ dependencies = [
  "cf-gears-toolkit-canonical-errors",
  "chrono",
  "chrono-tz",
- "http",
  "peg",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tracing",
  "uuid",
 ]
 
@@ -730,7 +725,6 @@ dependencies = [
 name = "cf-gears-toolkit-security"
 version = "0.7.1"
 dependencies = [
- "anyhow",
  "postcard",
  "secrecy",
  "serde",
@@ -1079,7 +1073,6 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "lint_utils",
- "tokio",
 ]
 
 [[package]]
@@ -2560,10 +2553,6 @@ dependencies = [
 [[package]]
 name = "lint_utils"
 version = "0.1.0"
-dependencies = [
- "clippy_utils",
- "dylint_linting",
-]
 
 [[package]]
 name = "linux-raw-sys"

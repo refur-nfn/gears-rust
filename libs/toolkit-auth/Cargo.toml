@@ -33,7 +33,6 @@ tracing = { workspace = true }
 jsonwebtoken = { workspace = true }
 tower = { workspace = true }
 http = { workspace = true }
-toolkit-security = { workspace = true }
 
 # HTTP client
 toolkit-http = { workspace = true }

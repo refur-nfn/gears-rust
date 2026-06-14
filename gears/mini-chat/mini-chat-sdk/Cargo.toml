@@ -29,8 +29,5 @@ serde_json = { workspace = true }
 utoipa = { workspace = true }
 schemars = { workspace = true }
 gts = { workspace = true }
-gts-macros = { workspace = true }
 toolkit = { workspace = true }
 toolkit-gts = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }

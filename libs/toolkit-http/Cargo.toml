@@ -18,6 +18,11 @@ name = "toolkit_http"
 [lints]
 workspace = true
 
+# Pulled in only to trigger Cargo feature unification (rustls/hyper-rustls
+# `fips`); never referenced in code by design.
+[package.metadata.cargo-shear]
+ignored = ["rustls-fips-shim"]
+
 [features]
 default = []
 # FIPS-140-3: the `cf-gears-rustls-fips-shim` crate pulls `rustls/fips` and
@@ -100,6 +105,5 @@ httpmock = { workspace = true }
 rcgen = { workspace = true }
 tempfile = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
-tracing-subscriber = { workspace = true }
 flate2 = { workspace = true }
 url = { workspace = true }
