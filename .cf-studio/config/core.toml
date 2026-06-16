@@ -216,6 +216,11 @@ path = "../studio-kit-gears/AGENTS.md"
 kind = "rule"
 public = true
 
+[kits.gears.resources.workflow_coding]
+path = "../studio-kit-gears/workflows/coding.md"
+kind = "skill"
+public = true
+
 [kits.gears.content_identity]
 manifest_semantic_hash = "f18fbf35b94136c023142025df3944bb32973c1a07e2acf9d4e397f6cfd5160a"
 manifest_bytes_hash = "05d0b4abc613f5ff45b12647357ee14acd7a1fb86860583f3c9c67ce12b76ef7"
