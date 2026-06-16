@@ -1,9 +1,19 @@
 ---
-status: accepted
+status: superseded
 date: 2026-05-12
+superseded-by: 0003-cpt-cf-file-storage-adr-sidecar-data-plane
+superseded-date: 2026-06-16
 ---
 
 # ADR-0001: Proxy All File Content Traffic Through FileStorage
+
+> **Superseded by [ADR-0003: Split the Data Plane into a Signed-URL Sidecar](./0003-cpt-cf-file-storage-adr-sidecar-data-plane.md) (2026-06-16).**
+> This ADR chose to proxy all content through a single FileStorage monolith. ADR-0003 keeps every
+> property this decision protected — backend opacity, per-byte metering, uniform audit/policy —
+> but moves the byte-moving data plane into a dedicated **signed-URL sidecar** so it can scale and
+> relocate independently of the control plane. The signed URL points at our sidecar, never at the
+> raw backend, so this is **not** a return to the direct-to-backend presigned-URL model rejected
+> below. Kept for provenance.
 
 <!-- toc -->
 
