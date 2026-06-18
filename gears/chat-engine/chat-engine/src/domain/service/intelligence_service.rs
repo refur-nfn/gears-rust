@@ -883,6 +883,10 @@ impl IntelligenceService {
                         let evt = StreamingEvent::Complete(StreamingCompleteEvent {
                             message_id: summary_message_id,
                             metadata: last_metadata,
+                            // Summaries carry no citations.
+                            file_citations: vec![],
+                            link_citations: vec![],
+                            references: vec![],
                         });
                         tx_for_driver.send(evt).await.ok();
                     }
@@ -1981,6 +1985,9 @@ mod tests {
                 StreamingEvent::Complete(StreamingCompleteEvent {
                     message_id: Uuid::nil(),
                     metadata: Some(serde_json::json!({"summarized_message_ids": []})),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
                 }),
             ],
         );
@@ -2039,6 +2046,9 @@ mod tests {
                 StreamingEvent::Complete(StreamingCompleteEvent {
                     message_id: Uuid::nil(),
                     metadata: Some(serde_json::json!({"summarized_message_ids": []})),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
                 }),
             ],
         );

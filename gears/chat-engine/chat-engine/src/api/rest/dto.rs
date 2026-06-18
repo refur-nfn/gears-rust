@@ -143,6 +143,16 @@ pub struct MessagePartDto {
     pub part_type: String,
     pub content: JsonValue,
     pub number: u32,
+    /// Document citations attached to a `text` part (FR-023), serialized
+    /// verbatim. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_citations: Vec<JsonValue>,
+    /// Web-page citations attached to a `text` part. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_citations: Vec<JsonValue>,
+    /// URL references attached to a `text` part. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<JsonValue>,
 }
 
 impl From<SdkMessagePart> for MessagePartDto {
@@ -152,6 +162,21 @@ impl From<SdkMessagePart> for MessagePartDto {
             part_type: part_type_to_wire(p.part_type).to_owned(),
             content: p.content,
             number: p.number,
+            file_citations: p
+                .file_citations
+                .iter()
+                .filter_map(|c| serde_json::to_value(c).ok())
+                .collect(),
+            link_citations: p
+                .link_citations
+                .iter()
+                .filter_map(|c| serde_json::to_value(c).ok())
+                .collect(),
+            references: p
+                .references
+                .iter()
+                .filter_map(|r| serde_json::to_value(r).ok())
+                .collect(),
         }
     }
 }
@@ -170,6 +195,11 @@ impl From<MessagePartInputDto> for SdkMessagePartInput {
         Self {
             part_type: part_type_from_wire(&d.part_type),
             content: d.content,
+            // Citations/references are plugin-produced (assistant side); the
+            // inbound user-message wire shape does not carry them.
+            file_citations: Vec::new(),
+            link_citations: Vec::new(),
+            references: Vec::new(),
         }
     }
 }

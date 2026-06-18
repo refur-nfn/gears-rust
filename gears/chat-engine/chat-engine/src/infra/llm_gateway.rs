@@ -327,6 +327,9 @@ impl LlmGatewayPlugin {
             UpstreamEvent::Complete(meta) => StreamingEvent::Complete(StreamingCompleteEvent {
                 message_id,
                 metadata: Some(meta.to_json()),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
             }),
             UpstreamEvent::ContextOverflow(detail) => StreamingEvent::Error(StreamingErrorEvent {
                 message_id,
@@ -549,6 +552,9 @@ impl ChatEngineBackendPlugin for LlmGatewayPlugin {
                 "summary_text": summary_text,
                 "summarized_message_ids": summarized_ids,
             })),
+            file_citations: vec![],
+            link_citations: vec![],
+            references: vec![],
         });
 
         debug!(

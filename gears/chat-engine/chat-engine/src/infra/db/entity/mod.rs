@@ -1,3 +1,6 @@
+pub mod file_citation;
+pub mod link_citation;
+pub mod link_reference;
 pub mod message;
 pub mod message_part;
 pub mod message_reaction;

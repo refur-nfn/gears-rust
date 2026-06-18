@@ -21,7 +21,9 @@
 use std::sync::Arc;
 
 use chat_engine::infra::db::Migrator;
-use chat_engine::infra::db::entity::{message, message_part, session, session_type};
+use chat_engine::infra::db::entity::{
+    file_citation, message, message_part, session, session_type,
+};
 use chat_engine::infra::db::repo::ChatEngineDb;
 use chat_engine::infra::db::repo::message_repo::{MessageRepo, SeaMessageRepo};
 use chat_engine::infra::db::repo::plugin_config_repo::{PluginConfigRepo, SeaPluginConfigRepo};
@@ -262,6 +264,33 @@ pub async fn message_parts_ordered(
     rows.into_iter()
         .map(|p| (part_type_str(&p.r#type).to_owned(), p.number, p.content))
         .collect()
+}
+
+/// Return the stored `file_citations.content` payloads for every part of
+/// `message_id`, ordered by part then citation `number` (FR-023).
+pub async fn file_citations_for_message(
+    db: &Arc<ChatEngineDb>,
+    message_id: Uuid,
+) -> Vec<serde_json::Value> {
+    let conn = db.conn().expect("conn for file_citations_for_message");
+    let scope = AccessScope::allow_all();
+    let parts = message_part::Entity::find()
+        .secure()
+        .scope_with(&scope)
+        .filter(Condition::all().add(message_part::Column::MessageId.eq(message_id)))
+        .all(&conn)
+        .await
+        .expect("load parts");
+    let pids: Vec<Uuid> = parts.iter().map(|p| p.id).collect();
+    let rows = file_citation::Entity::find()
+        .order_by_asc(file_citation::Column::Number)
+        .secure()
+        .scope_with(&scope)
+        .filter(Condition::all().add(file_citation::Column::MessagePartId.is_in(pids)))
+        .all(&conn)
+        .await
+        .expect("load file citations");
+    rows.into_iter().map(|r| r.content).collect()
 }
 
 /// Map a persisted part-type enum to its wire string (test-side mirror of the

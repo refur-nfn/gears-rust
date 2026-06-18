@@ -27,8 +27,11 @@ use std::time::Duration;
 use chat_engine::domain::service::message_service::{MessageService, SendMessageRequest};
 use chat_engine::domain::service::plugin_service::PluginService;
 use chat_engine::domain::service::session_service::Identity;
-use chat_engine_sdk::models::{MessagePartInput, MessagePartType};
-use chat_engine_sdk::{ChatEngineBackendPlugin, PluginError, StreamingChunkEvent, StreamingEvent};
+use chat_engine_sdk::models::{FileCitation, MessagePartInput, MessagePartType};
+use chat_engine_sdk::{
+    ChatEngineBackendPlugin, PluginError, StreamingChunkEvent, StreamingCompleteEvent,
+    StreamingEvent,
+};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use toolkit::ClientHub;
@@ -71,6 +74,9 @@ fn make_request(session_id: Uuid) -> SendMessageRequest {
         parts: vec![MessagePartInput {
             part_type: MessagePartType::Text,
             content: serde_json::json!({"text": "hello"}),
+            file_citations: vec![],
+            link_citations: vec![],
+            references: vec![],
         }],
         file_ids: vec![],
         parent_message_id: None,
@@ -206,14 +212,23 @@ async fn multi_part_user_message_round_trips_in_order_against_sqlite() {
             MessagePartInput {
                 part_type: MessagePartType::Text,
                 content: serde_json::json!({"text": "look at this"}),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
             },
             MessagePartInput {
                 part_type: MessagePartType::Code,
                 content: serde_json::json!({"language": "rust", "code": "fn main() {}"}),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
             },
             MessagePartInput {
                 part_type: MessagePartType::Links,
                 content: serde_json::json!({"links": [{"url": "https://example.com"}]}),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
             },
         ],
         file_ids: vec![],
@@ -242,6 +257,67 @@ async fn multi_part_user_message_round_trips_in_order_against_sqlite() {
         parts[1].2.get("language").and_then(|v| v.as_str()),
         Some("rust"),
         "code part content must round-trip verbatim",
+    );
+}
+
+// ===========================================================================
+// 1c. Citations — a plugin's terminal Complete event carries a file citation;
+//     it is persisted against the assistant's text part and read back (FR-023).
+// ===========================================================================
+
+#[tokio::test]
+async fn assistant_file_citation_persists_against_sqlite() {
+    let harness = db::setup_sqlite().await;
+    let plugin_id = "citation-plugin";
+    let session_type_id = db::seed_session_type(&harness, plugin_id).await;
+    let session_id = db::seed_active_session(&harness, TENANT_ID, USER_ID, session_type_id).await;
+
+    let cite: FileCitation = serde_json::from_value(serde_json::json!({
+        "document_id": "doc-1",
+        "document_name": "Doc One",
+        "index": 1,
+        "quote": "the answer is 42",
+        "text_positions": [7],
+    }))
+    .expect("build file citation");
+
+    let plugin = FakePlugin::new(
+        plugin_id,
+        FakePluginScript::Events(vec![
+            StreamingEvent::Chunk(StreamingChunkEvent {
+                message_id: Uuid::nil(),
+                chunk: "answer".into(),
+            }),
+            StreamingEvent::Complete(StreamingCompleteEvent {
+                message_id: Uuid::nil(),
+                metadata: None,
+                file_citations: vec![cite],
+                link_citations: vec![],
+                references: vec![],
+            }),
+        ]),
+    );
+    let plugin_dyn: Arc<dyn ChatEngineBackendPlugin> = plugin;
+    let svc = build_service(&harness, plugin_id, plugin_dyn);
+
+    let cancel = CancellationToken::new();
+    let mut stream = svc
+        .send_message(make_request(session_id), make_identity(), cancel)
+        .await
+        .expect("send_message dispatch");
+    while stream.next().await.is_some() {}
+
+    let assistant = db::find_assistant_message(&harness.db, session_id)
+        .await
+        .expect("assistant row persisted");
+    let cites = db::file_citations_for_message(&harness.db, assistant.message_id).await;
+    assert_eq!(cites.len(), 1, "one file citation must be persisted");
+    assert_eq!(cites[0]["document_id"], "doc-1");
+    assert_eq!(cites[0]["index"], 1);
+    assert_eq!(
+        cites[0]["text_positions"],
+        serde_json::json!([7]),
+        "text_positions must round-trip verbatim",
     );
 }
 

@@ -1246,6 +1246,8 @@ sequenceDiagram
 
 **Constraints**: UNIQUE (message_id, number)
 
+> **Storage model**: consistent with `message_parts.content`, `message.metadata`, and the "forward verbatim, don't interpret" principle (`cpt-cf-chat-engine-principle-zero-business-logic`), each citation/reference row stores its full plugin-supplied payload as a single `content` JSONB column rather than exploding every field into typed columns. The field set inside `content` is exactly the entity shape documented in §3.1 (`cpt-cf-chat-engine-design-entity-file-citation` etc.). Only the structural columns the engine itself uses — `id`, `message_part_id`, and the ordering ordinal — are promoted.
+
 #### Table: file_citations
 
 - [ ] `p2` - **ID**: `cpt-cf-chat-engine-dbtable-file-citations`
@@ -1256,27 +1258,8 @@ Document citations attached to a `text` `message_part` (see `cpt-cf-chat-engine-
 |--------|------|-------------|
 | id | UUID PK | Unique citation identifier |
 | message_part_id | UUID FK | References message_parts (CASCADE DELETE) |
-| citation_id | VARCHAR NULL | Plugin-assigned id, unique per message |
-| index | INT NULL | Matches the `[N]` token in the part text (1-indexed) |
-| document_id | VARCHAR | Source document id |
-| document_name | VARCHAR | Source document name |
-| document_title | VARCHAR NULL | Human-readable title |
-| source | VARCHAR NULL | Document source / venue |
-| quote | TEXT | Quoted text |
-| char_start | INT NULL | Start offset into source plain text |
-| char_end | INT NULL | Exclusive end offset into source plain text |
-| chunk_id | VARCHAR NULL | Source chunk id |
-| chunk_preview | TEXT NULL | First ~200 chars of the chunk |
-| chunk_content | TEXT NULL | Full chunk body (text) or image URL |
-| chunk_type | VARCHAR | `text` / `image` |
-| page | INT NULL | Source page (1-indexed) |
-| timestamp | DOUBLE NULL | Video timestamp (seconds) |
-| highlights | JSONB | Highlighted spans within the chunk |
-| reference_type | VARCHAR NULL | `direct_quote` / `paraphrase` / `data_reference` / `methodology_reference` |
-| text_positions | INT[] | Offsets in the part text where `[index]` appears (plugin-provided) |
-| text_position_anchors | JSONB | Parallel array of `TextPositionAnchor` (plugin-provided) |
-| meta | JSONB | Opaque plugin metadata |
-| number | INT | 0-based ordinal within the part |
+| content | JSONB | Full `FileCitation` payload (document_id/name, quote, char offsets, chunk_*, page, timestamp, highlights, reference_type, text_positions, text_position_anchors, meta, citation_id, index) |
+| number | INT | 0-based ordinal within the part (insertion order) |
 
 #### Table: link_citations
 
@@ -1288,18 +1271,8 @@ Web-page citations attached to a `text` `message_part` (see `cpt-cf-chat-engine-
 |--------|------|-------------|
 | id | UUID PK | Unique citation identifier |
 | message_part_id | UUID FK | References message_parts (CASCADE DELETE) |
-| citation_id | VARCHAR NULL | Plugin-assigned id |
-| index | INT NULL | Matches the `[N]` token in the part text (1-indexed) |
-| url | VARCHAR | Cited page URL |
-| title | VARCHAR | Cited page title |
-| preview_text | TEXT NULL | Snippet/preview |
-| favicon_url | VARCHAR NULL | Favicon URL |
-| quote | TEXT NULL | Cited text |
-| char_start | INT NULL | Start offset into source plain text |
-| char_end | INT NULL | Exclusive end offset |
-| reference_type | VARCHAR NULL | Citation kind label |
-| text_positions | INT[] | Offsets in the part text where `[index]` appears (plugin-provided) |
-| number | INT | 0-based ordinal within the part |
+| content | JSONB | Full `LinkCitation` payload (url, title, preview_text, favicon_url, quote, char offsets, reference_type, text_positions, citation_id, index) |
+| number | INT | 0-based ordinal within the part (insertion order) |
 
 #### Table: link_references
 
@@ -1311,16 +1284,10 @@ Lightweight URL badges attached to a `text` `message_part` (see `cpt-cf-chat-eng
 |--------|------|-------------|
 | id | UUID PK | Unique reference identifier |
 | message_part_id | UUID FK | References message_parts (CASCADE DELETE) |
-| title | VARCHAR | Reference title |
-| url | VARCHAR | Reference URL |
-| preview_text | TEXT | Preview text |
-| position | INT[] | Offsets in the part text where the badge appears (plugin-provided) |
-| preview_highlights | JSONB | Highlight spans for the preview |
-| ref_type | VARCHAR | `url` / `document` / `internal` |
-| ref_meta | JSONB | Additional metadata (e.g. entity_id) |
-| idx | INT | Per-part ordinal so positional `[N]` → `refs[N-1]` is stable |
+| content | JSONB | Full `LinkReference` payload (title, url, preview_text, position, preview_highlights, ref_type, ref_meta, idx) |
+| number | INT | 0-based ordinal within the part (insertion order; the `idx` inside `content` carries the positional `[N]` mapping) |
 
-**Constraints**: UNIQUE (message_part_id, url)
+> De-duplication of references by URL (rolos's `UNIQUE(message_part_id, url)`) is not enforced at the DB layer because `url` lives inside the JSONB payload; the plugin owns reference uniqueness.
 
 #### Table: message_reactions
 

@@ -424,6 +424,15 @@ pub struct MessagePartInput {
     /// Typed payload; shape determined by `part_type`. Kept as JSON because the
     /// per-type shapes are plugin-extensible (validated structurally, not here).
     pub content: serde_json::Value,
+    /// Document citations attached to this part (meaningful for `text` parts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_citations: Vec<FileCitation>,
+    /// Web-page citations attached to this part (meaningful for `text` parts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_citations: Vec<LinkCitation>,
+    /// Lightweight URL references attached to this part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<LinkReference>,
 }
 
 /// A persisted, ordered fragment of a message body.
@@ -444,10 +453,20 @@ pub struct MessagePart {
     pub content: serde_json::Value,
     /// 0-based ordinal within the message; unique per message.
     pub number: u32,
+    /// Document citations attached to this part (only `text` parts carry these).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_citations: Vec<FileCitation>,
+    /// Web-page citations attached to this part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_citations: Vec<LinkCitation>,
+    /// Lightweight URL references attached to this part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<LinkReference>,
 }
 
 impl MessagePart {
-    /// Convenience constructor for a `text` part with the given body.
+    /// Convenience constructor for a `text` part with the given body (no
+    /// attached citations/references).
     #[must_use]
     pub fn text(id: Uuid, message_id: Uuid, number: u32, text: impl Into<String>) -> Self {
         Self {
@@ -456,8 +475,175 @@ impl MessagePart {
             part_type: MessagePartType::Text,
             content: serde_json::json!({ "text": text.into() }),
             number,
+            file_citations: Vec::new(),
+            link_citations: Vec::new(),
+            references: Vec::new(),
         }
     }
+}
+
+/// Per-marker source-location anchor, parallel to one entry in a citation's
+/// `text_positions`. Forwarded verbatim from the plugin (see DESIGN
+/// `cpt-cf-chat-engine-design-entity-citations`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextPositionAnchor {
+    /// Zero-indexed start offset of the cited fragment in the source text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_start: Option<i64>,
+    /// Exclusive end offset of the cited fragment in the source text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_end: Option<i64>,
+    /// Verbatim cited text at the `[char_start..char_end]` slice.
+    #[serde(default)]
+    pub quote: String,
+    /// Chunk identifier for this occurrence's source passage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<String>,
+    /// First ~200 chars of this occurrence's chunk, for hover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_preview: Option<String>,
+}
+
+/// A citation into a retrieved document, attached to a `text` message part.
+///
+/// Supplied by the backend plugin and stored verbatim — Chat Engine does not
+/// generate or interpret citations. `index` matches a `[N]` marker in the part
+/// text (1-indexed), sharing one namespace with [`LinkCitation`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileCitation {
+    /// Plugin-assigned id, unique per message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_id: Option<String>,
+    /// Matches the `[N]` token in the part text (1-indexed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    /// Source document id.
+    pub document_id: String,
+    /// Source document name.
+    pub document_name: String,
+    /// Human-readable document title, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_title: Option<String>,
+    /// Document source / venue, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Quoted text from the document.
+    #[serde(default)]
+    pub quote: String,
+    /// Zero-indexed start offset into the source plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_start: Option<i64>,
+    /// Exclusive end offset into the source plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_end: Option<i64>,
+    /// Source chunk identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<String>,
+    /// First ~200 chars of the chunk, for hover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_preview: Option<String>,
+    /// Full chunk body (text) or image URL (when `chunk_type = "image"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_content: Option<String>,
+    /// Content type of the cited chunk: `"text"` (default) or `"image"`.
+    #[serde(default = "default_chunk_type")]
+    pub chunk_type: String,
+    /// Source page number (1-indexed), when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<i32>,
+    /// Video timestamp in seconds, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<f64>,
+    /// Highlighted spans within the cited chunk (plugin-defined shape).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<serde_json::Value>,
+    /// `direct_quote` / `paraphrase` / `data_reference` / `methodology_reference`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_type: Option<String>,
+    /// Character offsets in the part text where this citation's `[index]` marker
+    /// appears. Pre-computed by the plugin; the engine forwards them verbatim.
+    #[serde(default)]
+    pub text_positions: Vec<u32>,
+    /// Per-marker source anchors, parallel to `text_positions`.
+    #[serde(default)]
+    pub text_position_anchors: Vec<TextPositionAnchor>,
+    /// Opaque plugin metadata; forwarded but not interpreted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+}
+
+/// A citation into a web page, attached to a `text` message part. Shares the
+/// `[N]` index namespace with [`FileCitation`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkCitation {
+    /// Plugin-assigned id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_id: Option<String>,
+    /// Matches the `[N]` token in the part text (1-indexed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    /// Cited page URL.
+    pub url: String,
+    /// Cited page title.
+    pub title: String,
+    /// Snippet / preview from the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_text: Option<String>,
+    /// Favicon URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favicon_url: Option<String>,
+    /// Cited text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    /// Zero-indexed start offset into the source plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_start: Option<i64>,
+    /// Exclusive end offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_end: Option<i64>,
+    /// Citation kind label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_type: Option<String>,
+    /// Character offsets in the part text where this citation's `[index]` marker
+    /// appears. Plugin-provided; forwarded verbatim.
+    #[serde(default)]
+    pub text_positions: Vec<u32>,
+}
+
+/// A lightweight URL badge attached to a `text` message part (no quote/anchor).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkReference {
+    /// Reference title.
+    #[serde(default)]
+    pub title: String,
+    /// Reference URL.
+    pub url: String,
+    /// Preview text.
+    #[serde(default)]
+    pub preview_text: String,
+    /// Character offsets in the part text where the badge appears.
+    #[serde(default)]
+    pub position: Vec<u32>,
+    /// Highlight spans for the preview (plugin-defined shape).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_highlights: Vec<serde_json::Value>,
+    /// Reference type: `"url"` (default) / `"document"` / `"internal"`.
+    #[serde(default = "default_ref_type")]
+    pub ref_type: String,
+    /// Additional metadata (e.g. `entity_id` for document references).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_meta: Option<serde_json::Value>,
+    /// Per-part ordinal so positional `[N]` → `refs[N-1]` is stable.
+    #[serde(default)]
+    pub idx: u32,
+}
+
+fn default_chunk_type() -> String {
+    String::from("text")
+}
+
+fn default_ref_type() -> String {
+    String::from("url")
 }
 
 /// Schema declaration of a capability supported by a backend plugin.
@@ -599,6 +785,16 @@ pub struct StreamingCompleteEvent {
     /// etc.). Omitted from the wire when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Document citations for the completed assistant `text` part. Persisted
+    /// with the text part on finalize (see FR-023).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_citations: Vec<FileCitation>,
+    /// Web-page citations for the completed assistant `text` part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_citations: Vec<LinkCitation>,
+    /// URL references for the completed assistant `text` part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<LinkReference>,
 }
 
 /// Signals a mid-stream failure; the assistant message may be incomplete.
@@ -666,6 +862,9 @@ mod streaming_event_wire_format_tests {
         let json = serde_json::to_value(StreamingEvent::Complete(StreamingCompleteEvent {
             message_id: fixed_id(),
             metadata: Some(serde_json::json!({ "usage": { "input_units": 1 } })),
+            file_citations: vec![],
+            link_citations: vec![],
+            references: vec![],
         }))
         .unwrap();
         assert_eq!(
@@ -683,6 +882,9 @@ mod streaming_event_wire_format_tests {
         let json = serde_json::to_value(StreamingEvent::Complete(StreamingCompleteEvent {
             message_id: fixed_id(),
             metadata: None,
+            file_citations: vec![],
+            link_citations: vec![],
+            references: vec![],
         }))
         .unwrap();
         assert_eq!(

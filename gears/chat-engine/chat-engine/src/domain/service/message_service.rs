@@ -72,7 +72,7 @@ use crate::domain::service::session_service::{Identity, redact_session};
 use crate::domain::service::webhook::{NoopWebhookEmitter, WebhookEmitter, WebhookEvent};
 use crate::domain::session::Session;
 use crate::infra::db::repo::message_repo::{
-    FinalizeOutcome, InsertedPair, MessageRepo, NewUserMessage,
+    FinalizeOutcome, InsertedPair, MessageRepo, NewUserMessage, PartCitations,
 };
 use crate::infra::db::repo::session_repo::SessionRepo;
 use crate::infra::db::repo::session_type_repo::SessionTypeRepo;
@@ -1191,7 +1191,10 @@ impl MessageService {
                         let Some(item) = next else {
                             // Plugin closed its stream without emitting
                             // `Complete`. Treat as a graceful end.
-                            outcome = DriverOutcome::Completed { metadata: last_metadata.clone() };
+                            outcome = DriverOutcome::Completed {
+                                metadata: last_metadata.clone(),
+                                citations: PartCitations::default(),
+                            };
                             break;
                         };
 
@@ -1217,12 +1220,26 @@ impl MessageService {
                             }
                             Ok(StreamingEvent::Complete(c)) => {
                                 last_metadata = c.metadata.clone();
+                                // Citations/references the plugin attached to its
+                                // text part — forwarded to the client and captured
+                                // for persistence at finalize (FR-023).
+                                let citations = PartCitations {
+                                    file_citations: c.file_citations.clone(),
+                                    link_citations: c.link_citations.clone(),
+                                    references: c.references.clone(),
+                                };
                                 let evt = StreamingEvent::Complete(StreamingCompleteEvent {
                                     message_id: assistant_id,
                                     metadata: c.metadata,
+                                    file_citations: c.file_citations,
+                                    link_citations: c.link_citations,
+                                    references: c.references,
                                 });
                                 tx_for_driver.send(evt).await.ok();
-                                outcome = DriverOutcome::Completed { metadata: last_metadata.clone() };
+                                outcome = DriverOutcome::Completed {
+                                    metadata: last_metadata.clone(),
+                                    citations,
+                                };
                                 break;
                             }
                             Ok(StreamingEvent::Error(e)) => {
@@ -1275,7 +1292,10 @@ impl MessageService {
             // propagated — the wire stream is already closed and a
             // database hiccup must not cause the connection to hang.
             let persist = match outcome {
-                DriverOutcome::Completed { metadata } => {
+                DriverOutcome::Completed {
+                    metadata,
+                    citations,
+                } => {
                     messages
                         .finalize_assistant(
                             session_id,
@@ -1283,6 +1303,7 @@ impl MessageService {
                             FinalizeOutcome::Complete {
                                 text: accumulator,
                                 metadata,
+                                citations,
                             },
                         )
                         .await
@@ -1423,6 +1444,7 @@ struct OverflowDispatchCtx {
 enum DriverOutcome {
     Completed {
         metadata: Option<JsonValue>,
+        citations: PartCitations,
     },
     CancelledByClient,
     Errored {
@@ -1698,7 +1720,9 @@ mod tests {
     impl From<FinalizeOutcome> for FinalizeOutcomeSnapshot {
         fn from(value: FinalizeOutcome) -> Self {
             match value {
-                FinalizeOutcome::Complete { text, metadata } => Self::Complete { text, metadata },
+                FinalizeOutcome::Complete { text, metadata, .. } => {
+                    Self::Complete { text, metadata }
+                }
                 FinalizeOutcome::Cancelled { text } => Self::Cancelled { text },
                 FinalizeOutcome::Errored {
                     text,
@@ -1880,6 +1904,9 @@ mod tests {
             parts: vec![MessagePartInput {
                 part_type: chat_engine_sdk::models::MessagePartType::Text,
                 content: serde_json::json!({"text": "hello"}),
+                file_citations: vec![],
+                link_citations: vec![],
+                references: vec![],
             }],
             file_ids: vec![],
             parent_message_id: None,
@@ -1908,6 +1935,9 @@ mod tests {
                 StreamingEvent::Complete(StreamingCompleteEvent {
                     message_id: assistant_placeholder,
                     metadata: Some(serde_json::json!({"model": "test"})),
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
                 }),
             ]),
         );

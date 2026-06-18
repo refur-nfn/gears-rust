@@ -34,7 +34,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chat_engine_sdk::models::{MessagePart, MessagePartInput};
+use chat_engine_sdk::models::{
+    FileCitation, LinkCitation, LinkReference, MessagePart, MessagePartInput,
+};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveValue::Set, ColumnTrait, Condition, EntityTrait, QueryOrder};
 use serde_json::Value as JsonValue;
@@ -50,6 +52,10 @@ use crate::domain::message::{Message, part_type_to_entity};
 use crate::infra::db::entity::message::{self as message_entity, Entity as MessageEntity};
 use crate::infra::db::entity::message_part::{
     self as message_part_entity, Entity as MessagePartEntity, compute_next_part_number,
+};
+use crate::infra::db::entity::{
+    file_citation as file_citation_entity, link_citation as link_citation_entity,
+    link_reference as link_reference_entity,
 };
 use crate::infra::db::repo::ChatEngineDb;
 use crate::infra::db::{
@@ -99,6 +105,25 @@ pub struct InsertedPair {
     pub user_variant_index: i32,
 }
 
+/// Citations and references the plugin attached to its terminal `text` part
+/// (FR-023). Persisted into the child tables keyed by the finalized part id.
+#[derive(Debug, Clone, Default)]
+pub struct PartCitations {
+    pub file_citations: Vec<FileCitation>,
+    pub link_citations: Vec<LinkCitation>,
+    pub references: Vec<LinkReference>,
+}
+
+impl PartCitations {
+    /// True when there is nothing to persist.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.file_citations.is_empty()
+            && self.link_citations.is_empty()
+            && self.references.is_empty()
+    }
+}
+
 /// Three-way outcome the finalize step must persist. Mirrors the streaming
 /// state machine in ADR-0003.
 #[derive(Debug, Clone)]
@@ -111,6 +136,8 @@ pub enum FinalizeOutcome {
         /// Plugin-defined metadata (model, finish_reason, usage). When
         /// `Some` it overrides whatever the stub carried.
         metadata: Option<JsonValue>,
+        /// Citations/references attached to the completed text part (FR-023).
+        citations: PartCitations,
     },
     /// Client disconnected (or deadline elapsed) mid-stream. Persist the
     /// partial response with `cancelled=true, partial=true` markers.
@@ -315,9 +342,12 @@ impl SeaMessageRepo {
             .all(&conn)
             .await?;
 
+        let mut parts: Vec<MessagePart> = rows.into_iter().map(MessagePart::from).collect();
+        self.attach_citations(&mut parts).await?;
+
         let mut by_msg: HashMap<Uuid, Vec<MessagePart>> = HashMap::new();
-        for row in rows {
-            by_msg.entry(row.message_id).or_default().push(row.into());
+        for part in parts {
+            by_msg.entry(part.message_id).or_default().push(part);
         }
         for m in &mut msgs {
             if let Some(parts) = by_msg.remove(&m.message_id) {
@@ -325,6 +355,80 @@ impl SeaMessageRepo {
             }
         }
         Ok(msgs)
+    }
+
+    /// Batch-load citations/references for the given parts and attach them to
+    /// each text part (FR-023). One query per child table for the whole batch,
+    /// each ordered by `number`; payloads are deserialized from the stored
+    /// JSON. Non-text parts simply have no rows.
+    async fn attach_citations(
+        &self,
+        parts: &mut [MessagePart],
+    ) -> Result<(), ChatEngineError> {
+        if parts.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<Uuid> = parts.iter().map(|p| p.id).collect();
+        let conn = self.db.conn()?;
+        let scope = AccessScope::allow_all();
+
+        let file_rows = file_citation_entity::Entity::find()
+            .order_by_asc(file_citation_entity::Column::Number)
+            .secure()
+            .scope_with(&scope)
+            .filter(
+                Condition::all().add(file_citation_entity::Column::MessagePartId.is_in(ids.clone())),
+            )
+            .all(&conn)
+            .await?;
+        let link_rows = link_citation_entity::Entity::find()
+            .order_by_asc(link_citation_entity::Column::Number)
+            .secure()
+            .scope_with(&scope)
+            .filter(
+                Condition::all().add(link_citation_entity::Column::MessagePartId.is_in(ids.clone())),
+            )
+            .all(&conn)
+            .await?;
+        let ref_rows = link_reference_entity::Entity::find()
+            .order_by_asc(link_reference_entity::Column::Number)
+            .secure()
+            .scope_with(&scope)
+            .filter(Condition::all().add(link_reference_entity::Column::MessagePartId.is_in(ids)))
+            .all(&conn)
+            .await?;
+
+        let mut files: HashMap<Uuid, Vec<FileCitation>> = HashMap::new();
+        for row in file_rows {
+            if let Ok(c) = serde_json::from_value::<FileCitation>(row.content) {
+                files.entry(row.message_part_id).or_default().push(c);
+            }
+        }
+        let mut links: HashMap<Uuid, Vec<LinkCitation>> = HashMap::new();
+        for row in link_rows {
+            if let Ok(c) = serde_json::from_value::<LinkCitation>(row.content) {
+                links.entry(row.message_part_id).or_default().push(c);
+            }
+        }
+        let mut refs: HashMap<Uuid, Vec<LinkReference>> = HashMap::new();
+        for row in ref_rows {
+            if let Ok(r) = serde_json::from_value::<LinkReference>(row.content) {
+                refs.entry(row.message_part_id).or_default().push(r);
+            }
+        }
+
+        for p in parts.iter_mut() {
+            if let Some(v) = files.remove(&p.id) {
+                p.file_citations = v;
+            }
+            if let Some(v) = links.remove(&p.id) {
+                p.link_citations = v;
+            }
+            if let Some(v) = refs.remove(&p.id) {
+                p.references = v;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -453,13 +557,17 @@ impl MessageRepo for SeaMessageRepo {
         assistant_message_id: Uuid,
         outcome: FinalizeOutcome,
     ) -> Result<(), ChatEngineError> {
-        let (text, metadata, is_complete) = match outcome {
-            FinalizeOutcome::Complete { text, metadata } => (text, metadata, true),
+        let (text, metadata, is_complete, citations) = match outcome {
+            FinalizeOutcome::Complete {
+                text,
+                metadata,
+                citations,
+            } => (text, metadata, true, citations),
             FinalizeOutcome::Cancelled { text } => {
                 let mut meta = serde_json::Map::new();
                 meta.insert("cancelled".into(), JsonValue::Bool(true));
                 meta.insert("partial".into(), JsonValue::Bool(true));
-                (text, Some(JsonValue::Object(meta)), false)
+                (text, Some(JsonValue::Object(meta)), false, PartCitations::default())
             }
             FinalizeOutcome::Errored {
                 text,
@@ -473,7 +581,7 @@ impl MessageRepo for SeaMessageRepo {
                 );
                 meta.insert("error".into(), JsonValue::String(error));
                 meta.insert("partial".into(), JsonValue::Bool(true));
-                (text, Some(JsonValue::Object(meta)), false)
+                (text, Some(JsonValue::Object(meta)), false, PartCitations::default())
             }
         };
 
@@ -505,7 +613,11 @@ impl MessageRepo for SeaMessageRepo {
                         .await?;
 
                     if result.rows_affected == 1 {
-                        append_text_part(tx, &scope, assistant_message_id, &text).await?;
+                        let part_id =
+                            append_text_part(tx, &scope, assistant_message_id, &text).await?;
+                        // Attach the plugin's citations/references to the text
+                        // part in the same transaction (FR-023).
+                        insert_part_citations(tx, &scope, part_id, &citations).await?;
                     }
                     Ok::<u64, ChatEngineError>(result.rows_affected)
                 })
@@ -999,20 +1111,22 @@ where
 }
 
 /// Append a single `text` part to `message_id` (number = `MAX(number)+1`)
-/// inside the caller's transaction. Used by finalize/summary which add the
-/// machine-generated text body after the message row already exists.
+/// inside the caller's transaction and return its new id. Used by
+/// finalize/summary which add the machine-generated text body after the
+/// message row already exists.
 async fn append_text_part<R>(
     runner: &R,
     scope: &AccessScope,
     message_id: Uuid,
     text: &str,
-) -> Result<(), ChatEngineError>
+) -> Result<Uuid, ChatEngineError>
 where
     R: DBRunner,
 {
     let number = compute_next_part_number(runner, message_id).await?;
+    let part_id = Uuid::new_v4();
     let am = message_part_entity::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(part_id),
         message_id: Set(message_id),
         r#type: Set(message_part_entity::MessagePartType::Text),
         content: Set(text_part_content(text)),
@@ -1023,5 +1137,59 @@ where
         .scope_unchecked(scope)?
         .exec(runner)
         .await?;
+    Ok(part_id)
+}
+
+/// Persist the plugin's citations/references for a finalized `text` part into
+/// the three child tables, numbered `0..n` in list order, inside the caller's
+/// transaction (FR-023). The payloads are stored verbatim as JSON.
+async fn insert_part_citations<R>(
+    runner: &R,
+    scope: &AccessScope,
+    part_id: Uuid,
+    citations: &PartCitations,
+) -> Result<(), ChatEngineError>
+where
+    R: DBRunner,
+{
+    for (idx, c) in citations.file_citations.iter().enumerate() {
+        let am = file_citation_entity::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            message_part_id: Set(part_id),
+            content: Set(serde_json::to_value(c).unwrap_or(JsonValue::Null)),
+            number: Set(i32::try_from(idx).unwrap_or(i32::MAX)),
+        };
+        file_citation_entity::Entity::insert(am)
+            .secure()
+            .scope_unchecked(scope)?
+            .exec(runner)
+            .await?;
+    }
+    for (idx, c) in citations.link_citations.iter().enumerate() {
+        let am = link_citation_entity::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            message_part_id: Set(part_id),
+            content: Set(serde_json::to_value(c).unwrap_or(JsonValue::Null)),
+            number: Set(i32::try_from(idx).unwrap_or(i32::MAX)),
+        };
+        link_citation_entity::Entity::insert(am)
+            .secure()
+            .scope_unchecked(scope)?
+            .exec(runner)
+            .await?;
+    }
+    for (idx, r) in citations.references.iter().enumerate() {
+        let am = link_reference_entity::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            message_part_id: Set(part_id),
+            content: Set(serde_json::to_value(r).unwrap_or(JsonValue::Null)),
+            number: Set(i32::try_from(idx).unwrap_or(i32::MAX)),
+        };
+        link_reference_entity::Entity::insert(am)
+            .secure()
+            .scope_unchecked(scope)?
+            .exec(runner)
+            .await?;
+    }
     Ok(())
 }

@@ -1288,6 +1288,9 @@ mod tests {
                     vec![MessagePartInput {
                         part_type: chat_engine_sdk::models::MessagePartType::Text,
                         content: json!({"text": "x"}),
+                        file_citations: vec![],
+                        link_citations: vec![],
+                        references: vec![],
                     }],
                     None,
                     None,
@@ -1359,6 +1362,9 @@ mod tests {
         let evt = StreamingEvent::Complete(StreamingCompleteEvent {
             message_id: Uuid::nil(),
             metadata: Some(json!({"model": "gpt-test"})),
+            file_citations: vec![],
+            link_citations: vec![],
+            references: vec![],
         });
         let out = augment_complete_event(evt, &info);
         match out {
@@ -1379,6 +1385,9 @@ mod tests {
         let evt = StreamingEvent::Complete(StreamingCompleteEvent {
             message_id: Uuid::nil(),
             metadata: None,
+            file_citations: vec![],
+            link_citations: vec![],
+            references: vec![],
         });
         let out = augment_complete_event(evt, &info);
         match out {

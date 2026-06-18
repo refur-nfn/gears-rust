@@ -39,6 +39,10 @@ pub const UQ_VARIANT_INDEX_ROOT: &str = "uq_messages_session_root_variant";
 /// because un-backfilled legacy rows hold NULL and need not be indexed.
 pub const IDX_MESSAGES_TENANT: &str = "idx_messages_tenant";
 
+/// Citation / reference child tables of `message_parts` (FR-023). All share
+/// the shape `(id, message_part_id, content JSONB, number)`.
+pub const CITATION_TABLES: [&str; 3] = ["file_citations", "link_citations", "link_references"];
+
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -230,10 +234,59 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // Citation / reference child tables (FR-023). Each row carries the full
+        // plugin-supplied payload as `content` JSONB plus the structural columns
+        // the engine uses; CASCADE FK to `message_parts` so a part (or message)
+        // delete removes attached citations. The three tables are structurally
+        // identical, so they are built in a loop via `Alias`.
+        for table in CITATION_TABLES {
+            manager
+                .create_table(
+                    Table::create()
+                        .table(Alias::new(table))
+                        .if_not_exists()
+                        .col(
+                            ColumnDef::new(Alias::new("id"))
+                                .uuid()
+                                .not_null()
+                                .primary_key(),
+                        )
+                        .col(ColumnDef::new(Alias::new("message_part_id")).uuid().not_null())
+                        .col(ColumnDef::new(Alias::new("content")).json_binary().not_null())
+                        .col(ColumnDef::new(Alias::new("number")).integer().not_null())
+                        .foreign_key(
+                            ForeignKey::create()
+                                .name(format!("fk_{table}_part"))
+                                .from(Alias::new(table), Alias::new("message_part_id"))
+                                .to(MessageParts::Table, MessageParts::Id)
+                                .on_delete(ForeignKeyAction::Cascade),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+
+            manager
+                .create_index(
+                    Index::create()
+                        .name(format!("idx_{table}_part"))
+                        .table(Alias::new(table))
+                        .col(Alias::new("message_part_id"))
+                        .to_owned(),
+                )
+                .await?;
+        }
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Drop citation children before their parent `message_parts`.
+        for table in CITATION_TABLES {
+            manager
+                .drop_table(Table::drop().table(Alias::new(table)).if_exists().to_owned())
+                .await?;
+        }
+
         manager
             .drop_table(
                 Table::drop()

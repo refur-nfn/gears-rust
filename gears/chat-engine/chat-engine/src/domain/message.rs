@@ -162,6 +162,11 @@ impl From<message_part_entity::Model> for MessagePart {
             // construction (`compute_next_part_number` starts at 0); clamp
             // defensively rather than panic at the boundary.
             number: u32::try_from(p.number).unwrap_or(0),
+            // Citations live in their own child tables; `From<Model>` yields
+            // empty lists and the repo attaches them on read (like parts).
+            file_citations: Vec::new(),
+            link_citations: Vec::new(),
+            references: Vec::new(),
         }
     }
 }

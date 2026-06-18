@@ -16,10 +16,11 @@ pub mod plugin;
 
 pub use error::PluginError;
 pub use models::{
-    Capability, CapabilityValue, HealthStatus, LifecycleState, MemoryStrategy, Message,
-    MessagePart, MessagePartInput, MessagePartType, MessageRole, RetentionPolicy, Session,
-    SessionType, StreamingChunkEvent, StreamingCompleteEvent, StreamingErrorEvent, StreamingEvent,
-    StreamingStartEvent, TenantId, UserId, VariantInfo,
+    Capability, CapabilityValue, FileCitation, HealthStatus, LifecycleState, LinkCitation,
+    LinkReference, MemoryStrategy, Message, MessagePart, MessagePartInput, MessagePartType,
+    MessageRole, RetentionPolicy, Session, SessionType, StreamingChunkEvent, StreamingCompleteEvent,
+    StreamingErrorEvent, StreamingEvent, StreamingStartEvent, TenantId, TextPositionAnchor, UserId,
+    VariantInfo,
 };
 pub use plugin::{
     ChatEngineBackendPlugin, MessagePluginCtx, PluginCallContext, PluginStream, SessionPluginCtx,

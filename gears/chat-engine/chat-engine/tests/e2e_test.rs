@@ -75,6 +75,9 @@ fn it_streaming_complete_event_omits_metadata_when_none() {
     let evt = StreamingEvent::Complete(StreamingCompleteEvent {
         message_id: msg_id,
         metadata: None,
+        file_citations: vec![],
+        link_citations: vec![],
+        references: vec![],
     });
     let v = serde_json::to_value(&evt).expect("serialize complete event");
     assert_eq!(v["type"], "complete");
@@ -90,6 +93,9 @@ fn it_streaming_complete_event_includes_metadata_when_some() {
     let evt = StreamingEvent::Complete(StreamingCompleteEvent {
         message_id: Uuid::nil(),
         metadata: Some(serde_json::json!({"model": "stub-v1", "usage": {"input": 1}})),
+        file_citations: vec![],
+        link_citations: vec![],
+        references: vec![],
     });
     let v = serde_json::to_value(&evt).expect("serialize");
     assert_eq!(v["metadata"]["model"], "stub-v1");
@@ -564,6 +570,9 @@ async fn it_stream_from_events_replays_in_order() {
         StreamingEvent::Complete(StreamingCompleteEvent {
             message_id: msg_id,
             metadata: None,
+            file_citations: vec![],
+            link_citations: vec![],
+            references: vec![],
         }),
     ];
     let mut s: PluginStream = stream_from_events(events);

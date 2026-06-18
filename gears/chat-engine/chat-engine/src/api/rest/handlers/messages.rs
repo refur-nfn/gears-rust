@@ -531,6 +531,9 @@ mod tests {
                 StreamingEvent::Complete(StreamingCompleteEvent {
                     message_id: Uuid::nil(),
                     metadata: None,
+                    file_citations: vec![],
+                    link_citations: vec![],
+                    references: vec![],
                 }),
             ]))
         }
