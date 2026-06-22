@@ -136,14 +136,25 @@ where
 /// (mid-stream errors travel as `StreamingEvent::Error` lines, never as a
 /// `Result::Err`).
 ///
-/// The supplied `cancel` token is wired to fire when axum drops the response
-/// body (client disconnect / connection close) so the plugin-driver task
-/// tears down promptly rather than streaming into the void.
+/// The supplied `cancel` token fires when axum drops the response **body**
+/// (client disconnect / connection close), so the plugin-driver task tears
+/// down promptly rather than streaming into the void.
+///
+/// The cancel-on-drop [`DropGuard`](tokio_util::sync::CancellationToken)
+/// is owned by the body stream — **not** the response extensions. axum
+/// drops response extensions as soon as it has the response head, well
+/// before the body finishes streaming; parking the guard there would cancel
+/// the driver after the very first event. Tying it to the body's lifetime
+/// is the load-bearing detail.
 pub(crate) fn ndjson_stream_response(
     stream: crate::domain::service::message_service::SendMessageStream,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Response {
-    let body_stream = stream.map(|evt| {
+    let guard = cancel.drop_guard();
+    let body_stream = stream.map(move |evt| {
+        // Owns `guard` for the body's lifetime; dropped (→ cancels the
+        // driver token) when the body completes or the client disconnects.
+        let _keep = &guard;
         let mut bytes = serde_json::to_vec(&evt).unwrap_or_else(|err| {
             tracing::error!(error = %err, "failed to serialize StreamingEvent");
             br#"{"type":"error","error":"internal serialization failure"}"#.to_vec()
@@ -152,7 +163,7 @@ pub(crate) fn ndjson_stream_response(
         std::result::Result::<_, Infallible>::Ok(bytes)
     });
 
-    let mut response = Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(
             header::CONTENT_TYPE,
@@ -166,37 +177,7 @@ pub(crate) fn ndjson_stream_response(
             let mut resp = Response::new(Body::empty());
             *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             resp
-        });
-    response
-        .extensions_mut()
-        .insert(StreamCancelGuard::new(cancel));
-    response
-}
-
-/// Cancel-on-drop guard stored on the streaming response so the driver token
-/// is cancelled when axum drops the body (client disconnect).
-#[derive(Clone)]
-struct StreamCancelGuard {
-    #[allow(dead_code, reason = "kept alive for the Drop side-effect")]
-    inner: std::sync::Arc<StreamCancelGuardInner>,
-}
-
-struct StreamCancelGuardInner {
-    token: tokio_util::sync::CancellationToken,
-}
-
-impl StreamCancelGuard {
-    fn new(token: tokio_util::sync::CancellationToken) -> Self {
-        Self {
-            inner: std::sync::Arc::new(StreamCancelGuardInner { token }),
-        }
-    }
-}
-
-impl Drop for StreamCancelGuardInner {
-    fn drop(&mut self) {
-        self.token.cancel();
-    }
+        })
 }
 
 fn serialize_event_or_fallback(evt: &StreamingEventDto) -> Vec<u8> {

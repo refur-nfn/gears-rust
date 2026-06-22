@@ -26,9 +26,10 @@ use toolkit::api::operation_builder::{LicenseFeature, OperationBuilder};
 use crate::api::rest::WebhookEmitter;
 use crate::api::rest::dto::{
     CreateSessionRequestDto, ExportAcceptedDto, MessageDto, MessageListDto, ReactionListDto,
-    ReactionRequestDto, RecreateMessageRequestDto, SearchRequestDto, SearchResultsDto,
-    SendMessageRequestDto, SessionDto, ShareRequestDto, ShareResponseDto, SharedSessionDto,
-    StreamingEventDto, SwitchSessionTypeRequestDto, VariantListDto,
+    ReactionRequestDto, RecreateMessageRequestDto, RegisterSessionTypeRequestDto, SearchRequestDto,
+    SearchResultsDto, SendMessageRequestDto, SessionDto, SessionTypeDto, ShareRequestDto,
+    ShareResponseDto, SharedSessionDto, StreamingEventDto, SwitchSessionTypeRequestDto,
+    VariantListDto,
 };
 use crate::api::rest::handlers;
 use crate::domain::service::{
@@ -88,6 +89,53 @@ pub fn register_routes(
     enable_search: bool,
 ) -> Router {
     let mut router = router;
+
+    // -------------------------------------------------------------------
+    // Session types (developer-scope registration)
+    // -------------------------------------------------------------------
+
+    router = OperationBuilder::post("/chat-engine/v1/session-types")
+        .operation_id("chat_engine.session_type.register")
+        .summary("Register a session type and bind it to a backend plugin")
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features([&ChatEngineLicense])
+        .json_request::<RegisterSessionTypeRequestDto>(openapi, "Session type registration")
+        .handler(handlers::session_types::register_session_type)
+        .json_response_with_schema::<SessionTypeDto>(
+            openapi,
+            StatusCode::CREATED,
+            "Registered session type",
+        )
+        .standard_errors(openapi)
+        .register(router, openapi);
+
+    router = OperationBuilder::get("/chat-engine/v1/session-types")
+        .operation_id("chat_engine.session_type.list")
+        .summary("List registered session types")
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features([&ChatEngineLicense])
+        .handler(handlers::session_types::list_session_types)
+        .json_response_with_schema::<Vec<SessionTypeDto>>(
+            openapi,
+            StatusCode::OK,
+            "Session type list",
+        )
+        .standard_errors(openapi)
+        .register(router, openapi);
+
+    router = OperationBuilder::get("/chat-engine/v1/session-types/{id}")
+        .operation_id("chat_engine.session_type.get")
+        .summary("Get a session type")
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features([&ChatEngineLicense])
+        .path_param("id", "Session type UUID")
+        .handler(handlers::session_types::get_session_type)
+        .json_response_with_schema::<SessionTypeDto>(openapi, StatusCode::OK, "Session type")
+        .standard_errors(openapi)
+        .register(router, openapi);
 
     // -------------------------------------------------------------------
     // Session lifecycle

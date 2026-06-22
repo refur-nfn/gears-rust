@@ -104,6 +104,20 @@ pub struct SessionListDto {
 // SessionType DTOs
 // ---------------------------------------------------------------------------
 
+/// Body for `POST /chat-engine/v1/session-types`.
+#[api_dto(request)]
+#[derive(Debug, Clone)]
+pub struct RegisterSessionTypeRequestDto {
+    /// Human-readable name (opaque to Chat Engine).
+    pub name: String,
+    /// GTS plugin instance ID to bind. `None` registers an unwired type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_instance_id: Option<String>,
+    /// Opaque plugin configuration JSON handed to the bound plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_config: Option<JsonValue>,
+}
+
 /// Wire-shape projection of [`SdkSessionType`].
 #[api_dto(request, response)]
 #[derive(Debug, Clone)]
