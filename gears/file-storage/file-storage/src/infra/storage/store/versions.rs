@@ -82,6 +82,11 @@ impl Store {
     /// Record a version's size + hash and mark it `available`.
     /// Returns `true` if the version row existed and was updated.
     ///
+    /// `mime_type` is the validated/sniffed content type to persist in place
+    /// of the client's original declaration (see `mime::validate` at the
+    /// finalize call sites); pass `None` to leave the declared type untouched
+    /// (the multipart-complete path does not perform MIME validation).
+    ///
     /// An audit row is written in the same transaction.
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
@@ -92,6 +97,7 @@ impl Store {
         version_id: Uuid,
         size: i64,
         hash_value: Vec<u8>,
+        mime_type: Option<String>,
         audit: AuditEntry,
     ) -> Result<bool, DomainError> {
         let versions = self.repos.versions.clone();
@@ -108,6 +114,7 @@ impl Store {
                             version_id,
                             size,
                             hash_value,
+                            mime_type,
                         )
                         .await?;
                     if updated {

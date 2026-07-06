@@ -8,6 +8,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
@@ -70,6 +72,31 @@ impl StorageBackend for InMemoryBackend {
     async fn put(&self, path: &str, bytes: Bytes) -> Result<(), DomainError> {
         self.lock_blobs()?.insert(path.to_owned(), bytes);
         Ok(())
+    }
+
+    /// Collecting into a `Bytes` buffer is acceptable here: this backend is
+    /// explicitly non-durable, in-process storage for tests/dev deployments,
+    /// not a memory-DoS surface worth hardening. The override exists so the
+    /// shared backend contract tests (`local_fs_put_stream_*` and friends)
+    /// can run identically against every backend, not just `LocalFsBackend`.
+    async fn put_stream(
+        &self,
+        path: &str,
+        mut stream: BoxStream<'_, std::io::Result<Bytes>>,
+        max_size: Option<u64>,
+    ) -> Result<(u64, [u8; 32]), DomainError> {
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| DomainError::backend(&self.id, e.to_string()))?;
+            buf.extend_from_slice(&chunk);
+            if max_size.is_some_and(|m| buf.len() as u64 > m) {
+                return Err(DomainError::validation("size", "exceeds max_size"));
+            }
+        }
+        let bytes_written = buf.len() as u64;
+        let digest = hash::digest_to_array(hash::sha256(&buf));
+        self.lock_blobs()?.insert(path.to_owned(), Bytes::from(buf));
+        Ok((bytes_written, digest))
     }
 
     async fn get(&self, path: &str) -> Result<Bytes, DomainError> {

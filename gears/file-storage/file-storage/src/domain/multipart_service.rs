@@ -29,9 +29,10 @@ use crate::domain::multipart::{
     MultipartPartPlan, MultipartPlan, MultipartUploadState, compute_plan,
 };
 use crate::domain::policy::{PolicyResolver, PolicyScope};
-use crate::domain::ports::MultipartStore;
+use crate::domain::ports::{FileStorageMetricsPort, MultipartStore};
 use crate::infra::backend::BackendRegistry;
 use crate::infra::external_clients::{QuotaClient, QuotaDecision};
+use crate::infra::metrics::NoopMetrics;
 use crate::infra::signed_url::{Claims, Issuer, MultipartClaims, Op, UploadConstraints};
 
 /// Quota metric name (duplicated from service.rs; both refer to the same
@@ -55,6 +56,10 @@ pub struct MultipartService {
     sidecar_base_url: String,
     /// Signed-URL TTL in seconds (shared with the session expiry).
     url_ttl_secs: i64,
+    /// Metrics port (P2 1.8 remediation). Defaults to a no-op implementation
+    /// (see [`Self::new`]); `gear.rs` opts into the real OTel-backed meter via
+    /// [`Self::with_metrics`].
+    metrics: Arc<dyn FileStorageMetricsPort>,
 }
 
 impl MultipartService {
@@ -75,7 +80,18 @@ impl MultipartService {
             issuer,
             sidecar_base_url,
             url_ttl_secs,
+            metrics: Arc::new(NoopMetrics),
         }
+    }
+
+    /// Install a real metrics port (P2 1.8 remediation). Kept as a builder
+    /// step rather than a `new()` parameter so existing
+    /// `MultipartService::new(...)` call sites across the integration-test
+    /// suite keep compiling unchanged; only `gear.rs` needs to opt in.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<dyn FileStorageMetricsPort>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     // ── private helpers ──────────────────────────────────────────────────────
@@ -160,7 +176,11 @@ impl MultipartService {
             .await?
         {
             QuotaDecision::Allowed => Ok(()),
-            QuotaDecision::Denied { reason } => Err(DomainError::quota_exceeded(reason)),
+            QuotaDecision::Denied { reason } => {
+                self.metrics
+                    .record_quota_denied("initiate_multipart_upload");
+                Err(DomainError::quota_exceeded(reason))
+            }
         }
     }
 
@@ -183,6 +203,8 @@ impl MultipartService {
         // Best-effort: abort the backend handle.
         let backend = self.backends.default_backend();
         if let Err(abort_err) = backend.abort_multipart(backend_path, backend_handle).await {
+            self.metrics
+                .record_backend_error(backend.id(), "abort_multipart");
             tracing::warn!(
                 ?abort_err,
                 %upload_id,
@@ -234,6 +256,7 @@ impl MultipartService {
     /// @cpt-cf-file-storage-fr-multipart-upload
     /// @cpt-cf-file-storage-fr-size-limits-policy
     /// @cpt-cf-file-storage-fr-storage-quota
+    #[tracing::instrument(skip_all)]
     pub async fn initiate_multipart_upload(
         &self,
         ctx: &SecurityContext,
@@ -352,7 +375,11 @@ impl MultipartService {
 
         // Mint one signed URL per part (FEATURE §4).
         // Each token carries the exact `size` claim the sidecar will enforce.
+        // P2 1.8: every part of the same upload shares one correlation id, so
+        // the sidecar's report-part callbacks for this upload all echo back
+        // the same `x-request-id`.
         let exp = expires_at.unix_timestamp();
+        let request_id = Uuid::now_v7().to_string();
         let mut parts = Vec::with_capacity(raw_parts.len());
         for (part_number, offset, size) in raw_parts {
             let claims = Claims {
@@ -369,6 +396,7 @@ impl MultipartService {
                     offset,
                     size,
                 },
+                request_id: request_id.clone(),
             };
             let token = self.issuer.issue(claims, now)?;
             let upload_url = format!(
@@ -383,6 +411,8 @@ impl MultipartService {
             });
         }
 
+        self.metrics
+            .record_operation("initiate_multipart_upload", "ok");
         Ok(MultipartPlan {
             upload_id,
             version_id,
@@ -456,6 +486,7 @@ impl MultipartService {
     ///
     /// @cpt-cf-file-storage-fr-multipart-upload
     /// @cpt-cf-file-storage-fr-audit-trail
+    #[tracing::instrument(skip_all)]
     pub async fn complete_multipart_upload(
         &self,
         ctx: &SecurityContext,
@@ -618,6 +649,8 @@ impl MultipartService {
             ));
         }
 
+        self.metrics
+            .record_operation("complete_multipart_upload", "ok");
         Ok(())
     }
 

@@ -547,6 +547,21 @@ pub async fn finalize_version(
         .into());
     }
 
+    // P2 1.8 remediation: log the sidecar-propagated `x-request-id` (echoed
+    // from `claims.request_id`, minted at signed-URL issuance) so this
+    // control-plane log line can be joined with the sidecar's own log lines
+    // for the same upload.
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    tracing::info!(
+        request_id,
+        %file_id,
+        %version_id,
+        "finalize_version: sidecar callback received"
+    );
+
     let hash_value = hex::decode(&req.hash_hex)
         .map_err(|_| DomainError::validation("hash_hex", "must be valid hex-encoded SHA-256"))?;
 
@@ -608,6 +623,20 @@ pub async fn report_multipart_part(
             DomainError::token_invalid("token does not authorize reporting this part").into(),
         );
     }
+
+    // P2 1.8 remediation: same correlation-id logging as `finalize_version`.
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    tracing::info!(
+        request_id,
+        %file_id,
+        %version_id,
+        %upload_id,
+        part_number,
+        "report_multipart_part: sidecar callback received"
+    );
 
     let hash_value = hex::decode(&req.hash_hex)
         .map_err(|_| DomainError::validation("hash_hex", "must be valid hex-encoded SHA-256"))?;

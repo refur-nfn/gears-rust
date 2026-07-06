@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// printed (a config dump must not leak the URL-signing key).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct FileStorageConfig {
     /// Default URL TTL (seconds) applied to every signed URL the control plane
     /// mints, kept short to bound the stale-permission window (DESIGN §4.5,
@@ -52,6 +53,15 @@ pub struct FileStorageConfig {
     #[serde(default)]
     pub signing_key_seed: Option<String>,
 
+    /// When `true` (the default), gear init fails fast if `signing_key_seed`
+    /// is absent instead of silently minting an ephemeral per-boot key. A
+    /// multi-replica deployment that forgets to set the seed would otherwise
+    /// mint a different signing key per replica, breaking signed URLs across
+    /// requests routed to a different replica. Set `false` to explicitly opt
+    /// into the ephemeral-key dev/test behaviour.
+    #[serde(default = "default_require_signing_key_seed")]
+    pub require_signing_key_seed: bool,
+
     /// Window (seconds) for which an idempotency key is retained.
     /// After this window, a retry with the same key is treated as a fresh request.
     /// Default: 86400 (24 hours).
@@ -77,7 +87,10 @@ pub struct FileStorageConfig {
     pub sweep_interval_secs: u64,
 
     /// When `true`, the background cleanup sweep is started at gear init.
-    /// **Must be `false` by default** so integration tests are deterministic.
+    /// **Defaults to `true`** — any deployment that doesn't say otherwise
+    /// gets orphan/retention sweeping on out of the box. Test/dev harnesses
+    /// that construct a `FileStorageConfig` directly (not via YAML) and need
+    /// deterministic behavior must explicitly set this to `false`.
     ///
     /// @cpt-cf-file-storage-fr-orphan-reconciliation
     /// @cpt-cf-file-storage-fr-retention-policies
@@ -110,6 +123,16 @@ impl FileStorageConfig {
                  enable_background_sweep is true"
             );
         }
+        // A missing signing_key_seed makes gear init mint an ephemeral per-boot
+        // key; in a multi-replica deployment each replica would get a
+        // different key, breaking signed URLs across replicas. Require an
+        // explicit opt-out for this to be acceptable (e.g. local dev/test).
+        if self.require_signing_key_seed && self.signing_key_seed.is_none() {
+            anyhow::bail!(
+                "invalid file-storage config: signing_key_seed is required (set \
+                 require_signing_key_seed: false to allow an ephemeral per-boot key in dev)"
+            );
+        }
         Ok(())
     }
 }
@@ -133,6 +156,7 @@ impl fmt::Debug for FileStorageConfig {
                 "signing_key_seed",
                 &self.signing_key_seed.as_ref().map(|_| "<redacted>"),
             )
+            .field("require_signing_key_seed", &self.require_signing_key_seed)
             .finish()
     }
 }
@@ -147,6 +171,7 @@ impl Default for FileStorageConfig {
             max_page_size: default_max_page_size(),
             storage_root: default_storage_root(),
             signing_key_seed: None,
+            require_signing_key_seed: default_require_signing_key_seed(),
             idempotency_ttl_secs: default_idempotency_ttl_secs(),
             orphan_grace_secs: default_orphan_grace_secs(),
             sweep_interval_secs: default_sweep_interval_secs(),
@@ -196,7 +221,11 @@ fn default_sweep_interval_secs() -> u64 {
 }
 
 fn default_enable_background_sweep() -> bool {
-    false // must be false so tests are deterministic
+    true // on by default; test/dev harnesses building a config directly must opt out explicitly for determinism
+}
+
+fn default_require_signing_key_seed() -> bool {
+    true // secure-by-default: no seed configured must not silently accept an ephemeral key
 }
 
 #[cfg(test)]

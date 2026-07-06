@@ -32,8 +32,10 @@ use uuid::Uuid;
 use crate::domain::audit::{AuditEntry, AuditOperation, FileEvent};
 use crate::domain::authz::Authorizer;
 use crate::domain::error::DomainError;
+use crate::domain::ports::FileStorageMetricsPort;
 use crate::infra::backend::BackendRegistry;
 use crate::infra::external_clients::{QuotaClient, UsageDelta, UsageReporter};
+use crate::infra::metrics::NoopMetrics;
 use crate::infra::signed_url::{Claims, Issuer, MultipartClaims, Op, UploadConstraints};
 use crate::infra::storage::Store;
 
@@ -101,6 +103,10 @@ pub struct FileService {
     ///
     /// @cpt-cf-file-storage-fr-usage-reporting
     pub(super) usage_reporter: Option<Arc<dyn UsageReporter>>,
+    /// Metrics port (P2 1.8 remediation). Defaults to a no-op implementation
+    /// (see [`Self::new`]); `gear.rs` opts into the real OTel-backed meter via
+    /// [`Self::with_metrics`].
+    pub(super) metrics: Arc<dyn FileStorageMetricsPort>,
 }
 
 impl FileService {
@@ -121,7 +127,18 @@ impl FileService {
             cfg,
             quota_client,
             usage_reporter,
+            metrics: Arc::new(NoopMetrics),
         }
+    }
+
+    /// Install a real metrics port (P2 1.8 remediation). Kept as a builder
+    /// step rather than a `new()` parameter so the ~40 existing
+    /// `FileService::new(...)` call sites across the integration-test suite
+    /// keep compiling unchanged; only `gear.rs` needs to opt in.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<dyn FileStorageMetricsPort>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -157,6 +174,9 @@ impl FileService {
         constraints: UploadConstraints,
     ) -> Result<String, DomainError> {
         let now = OffsetDateTime::now_utc();
+        // P2 1.8: mint a fresh correlation id per signed URL. The sidecar
+        // echoes it back as `x-request-id` on its finalize callback so both
+        // planes' logs can be joined on the same id.
         let claims = Claims {
             op,
             file_id: v.file_id,
@@ -166,6 +186,7 @@ impl FileService {
             exp: now.unix_timestamp() + self.cfg.default_url_ttl_secs,
             upload: constraints,
             multipart: MultipartClaims::default(),
+            request_id: Uuid::now_v7().to_string(),
         };
         let token = self.issuer.issue(claims, now)?;
         let verb = match op {

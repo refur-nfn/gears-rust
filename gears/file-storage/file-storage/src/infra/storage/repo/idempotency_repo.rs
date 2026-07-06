@@ -118,6 +118,27 @@ impl IdempotencyRepo {
             .map_err(db_err)?;
         Ok(())
     }
+
+    /// Bulk-delete all rows whose `expires_at` is at or before `now`.
+    ///
+    /// Called by the cleanup sweep (P2 remediation 1.9) so the
+    /// `idempotency_keys` table doesn't grow unboundedly — previously only a
+    /// lapsed row *for the same key* was ever removed (in [`Self::insert`]),
+    /// never a table-wide sweep. Returns the number of rows removed.
+    pub async fn delete_expired<C: DBRunner>(
+        &self,
+        conn: &C,
+        now: OffsetDateTime,
+    ) -> Result<u64, DomainError> {
+        let res = Entity::delete_many()
+            .filter(Column::ExpiresAt.lte(now))
+            .secure()
+            .scope_with(&AccessScope::allow_all())
+            .exec(conn)
+            .await
+            .map_err(db_err)?;
+        Ok(res.rows_affected)
+    }
 }
 
 fn record_from_model(m: Model) -> IdempotencyRecord {

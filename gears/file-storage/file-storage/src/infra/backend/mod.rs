@@ -62,6 +62,42 @@ pub trait StorageBackend: Send + Sync {
     /// path, so callers do not rely on write-once semantics here).
     async fn put(&self, path: &str, bytes: Bytes) -> Result<(), DomainError>;
 
+    /// Stream a blob into `path`, hashing incrementally and enforcing
+    /// `max_size` as bytes arrive rather than buffering the whole body first
+    /// (`cpt-cf-file-storage-fr-backend-abstraction`, memory-DoS fix). Returns
+    /// `(bytes_written, sha256_digest)`.
+    ///
+    /// The default implementation falls back to buffering the entire stream
+    /// in memory (still enforcing `max_size` as chunks arrive, so an
+    /// oversized upload is still rejected — just not memory-bounded) before
+    /// delegating to `put`. This keeps every backend that hasn't been
+    /// upgraded to a true streaming write correct; backends for which
+    /// unbounded memory use during upload is a real concern (e.g.
+    /// `LocalFsBackend`) should override this method.
+    async fn put_stream(
+        &self,
+        path: &str,
+        stream: futures::stream::BoxStream<'_, std::io::Result<Bytes>>,
+        max_size: Option<u64>,
+    ) -> Result<(u64, [u8; 32]), DomainError> {
+        use futures::StreamExt;
+
+        let mut buf = Vec::new();
+        let mut stream = stream;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| DomainError::backend(self.id(), e.to_string()))?;
+            buf.extend_from_slice(&chunk);
+            if max_size.is_some_and(|m| buf.len() as u64 > m) {
+                return Err(DomainError::validation("size", "exceeds max_size"));
+            }
+        }
+        let bytes_written = buf.len() as u64;
+        let digest =
+            crate::infra::content::hash::digest_to_array(crate::infra::content::hash::sha256(&buf));
+        self.put(path, Bytes::from(buf)).await?;
+        Ok((bytes_written, digest))
+    }
+
     /// Read the whole blob at `path`.
     async fn get(&self, path: &str) -> Result<Bytes, DomainError>;
 
@@ -78,6 +114,19 @@ pub trait StorageBackend: Send + Sync {
             }
             None => Err(DomainError::validation("range", "unsatisfiable byte range")),
         }
+    }
+
+    /// The total length in bytes of the blob at `path`, without necessarily
+    /// reading its content. Range-aware callers (e.g. the sidecar's
+    /// `download` handler, P2 1.11) use this to resolve `Range` requests
+    /// against the actual blob length and to build a correct `Content-Range`
+    /// header, without materializing the whole blob first.
+    ///
+    /// The default implementation falls back to `get`, so only backends with
+    /// a cheaper standalone stat (e.g. `LocalFsBackend`'s filesystem
+    /// metadata) need to override it.
+    async fn size(&self, path: &str) -> Result<u64, DomainError> {
+        Ok(self.get(path).await?.len() as u64)
     }
 
     /// Delete the blob at `path`. Missing blobs are treated as success

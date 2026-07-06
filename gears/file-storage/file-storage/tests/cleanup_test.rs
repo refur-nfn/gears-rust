@@ -303,6 +303,13 @@ impl CleanupStore for FaultyListVersionsStore {
             .delete_file_with_event(scope, file_id, audit, event)
             .await
     }
+
+    async fn delete_expired_idempotency_keys(
+        &self,
+        now: time::OffsetDateTime,
+    ) -> Result<u64, DomainError> {
+        self.inner.delete_expired_idempotency_keys(now).await
+    }
 }
 
 // ── test 1: abandoned pending version sweep ────────────────────────────────────
@@ -1463,6 +1470,7 @@ async fn sweep_mid_flight_after_finalize_but_before_session_cas_does_not_delete_
             plan.version_id,
             5,
             vec![0u8; 32],
+            None,
             finalize_audit,
         )
         .await
@@ -1485,4 +1493,226 @@ async fn sweep_mid_flight_after_finalize_but_before_session_cas_does_not_delete_
         .unwrap()
         .expect("version row must not be deleted by the mid-flight cleanup");
     assert_eq!(after.status, VersionStatus::Available);
+}
+
+// ── test: idempotency-key GC / outbox lock-in (P2 remediation 1.9) ─────────────
+
+/// `run_sweep()` deletes `idempotency_keys` rows whose `expires_at` is at or
+/// before `now` and leaves live rows completely untouched.
+///
+/// Builds its own `Store`/`CleanupEngine` (rather than `build_all`) so the
+/// test can reach the raw `DBProvider` connection and seed rows directly via
+/// `IdempotencyRepo::insert`, then assert the post-sweep state via a direct
+/// `idempotency_key::Entity::find()` -- mirroring the pattern already used by
+/// `multipart_test.rs` for asserting DB state independent of the store's own
+/// read methods.
+///
+/// @cpt-cf-file-storage-fr-upload-idempotency
+#[tokio::test]
+async fn run_sweep_deletes_expired_idempotency_rows() {
+    use sea_orm::EntityTrait;
+    use toolkit_db::secure::SecureEntityExt;
+    use toolkit_security::AccessScope;
+
+    use file_storage::infra::storage::entity::idempotency_key;
+    use file_storage::infra::storage::repo::IdempotencyRepo;
+
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let store = Store::new(Arc::clone(&db));
+    let sweep_store: Arc<dyn CleanupStore> = Arc::new(store.clone());
+    let engine = CleanupEngine::new(
+        sweep_store,
+        backends.clone(),
+        CleanupConfig {
+            orphan_grace_secs: 0,
+        },
+    );
+
+    // `idempotency_keys.file_id` carries a `REFERENCES files (file_id)`
+    // foreign key, so the seeded rows must point at real file rows rather
+    // than arbitrary UUIDs.
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let svc = FileService::new(
+        store.clone(),
+        backends,
+        issuer,
+        authorizer,
+        ServiceConfig {
+            default_url_ttl_secs: 3600,
+            sidecar_base_url: "http://sidecar.test".to_owned(),
+            default_page_size: 50,
+            max_page_size: 1000,
+            idempotency_ttl_secs: 86400,
+        },
+        None,
+        None,
+    );
+    let tenant_id = Uuid::now_v7();
+    let ctx = ctx(tenant_id);
+    let expired_ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let live_ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let conn = db.conn().expect("conn");
+    let repo = IdempotencyRepo::new();
+    let subject_id = Uuid::now_v7();
+    let now = time::OffsetDateTime::now_utc();
+
+    // Expired row: `expires_at` is in the past, so the sweep must delete it.
+    repo.insert(
+        &conn,
+        tenant_id,
+        "user",
+        Uuid::now_v7(),
+        "expired-key",
+        subject_id,
+        expired_ticket.file_id,
+        201,
+        "{}",
+        "etag-expired",
+        now - time::Duration::hours(1),
+        now - time::Duration::hours(2),
+    )
+    .await
+    .expect("insert expired row");
+
+    // Live row: `expires_at` is in the future, so the sweep must leave it
+    // (and every one of its fields) untouched.
+    let live_owner_id = Uuid::now_v7();
+    let live_file_id = live_ticket.file_id;
+    repo.insert(
+        &conn,
+        tenant_id,
+        "user",
+        live_owner_id,
+        "live-key",
+        subject_id,
+        live_file_id,
+        201,
+        "{\"ok\":true}",
+        "etag-live",
+        now + time::Duration::days(1),
+        now,
+    )
+    .await
+    .expect("insert live row");
+
+    let result = engine.run_sweep().await;
+    assert_eq!(
+        result.idempotency_keys_deleted, 1,
+        "sweep should have deleted exactly the one expired idempotency row"
+    );
+
+    let rows = idempotency_key::Entity::find()
+        .secure()
+        .scope_with(&AccessScope::allow_all())
+        .all(&conn)
+        .await
+        .expect("query idempotency_keys directly");
+    assert_eq!(rows.len(), 1, "only the live row should remain");
+    let remaining = &rows[0];
+    assert_eq!(remaining.idempotency_key, "live-key");
+    assert_eq!(remaining.owner_id, live_owner_id);
+    assert_eq!(remaining.file_id, live_file_id);
+    assert_eq!(remaining.subject_id, subject_id);
+    assert_eq!(remaining.response_status, 201);
+    assert_eq!(remaining.response_body, "{\"ok\":true}");
+    assert_eq!(remaining.response_etag, "etag-live");
+}
+
+/// Defense-in-depth lock-in (P2 remediation 1.9): `run_sweep()` must NOT touch
+/// `audit_outbox`/`events_outbox` rows regardless of age, because `published_at`
+/// stays `NULL` until the Tier 4 `EventBroker` relay exists -- a row-age-based
+/// purge would silently drop events that were never delivered. This test seeds
+/// an ancient, unpublished row in each outbox table directly (there is no
+/// public API to backdate `occurred_at`) and confirms both survive a sweep.
+///
+/// @cpt-cf-file-storage-fr-audit-trail
+/// @cpt-cf-file-storage-fr-file-events
+#[tokio::test]
+async fn run_sweep_does_not_touch_unpublished_outbox_rows() {
+    use sea_orm::{EntityTrait, Set};
+    use toolkit_db::secure::{SecureEntityExt, secure_insert};
+    use toolkit_security::AccessScope;
+
+    use file_storage::infra::storage::entity::{audit_outbox, events_outbox};
+
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let store = Store::new(Arc::clone(&db));
+    let sweep_store: Arc<dyn CleanupStore> = Arc::new(store.clone());
+    let engine = CleanupEngine::new(
+        sweep_store,
+        backends,
+        CleanupConfig {
+            orphan_grace_secs: 0,
+        },
+    );
+
+    let conn = db.conn().expect("conn");
+    // Deliberately ancient -- decades old -- so any plausible age-based purge
+    // threshold would have caught it.
+    let ancient = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(1);
+    let tenant_id = Uuid::now_v7();
+    let file_id = Uuid::now_v7();
+
+    let audit_event_id = Uuid::now_v7();
+    let audit_am = audit_outbox::ActiveModel {
+        event_id: Set(audit_event_id),
+        tenant_id: Set(tenant_id),
+        actor_kind: Set("system".to_owned()),
+        actor_id: Set(Uuid::nil()),
+        file_id: Set(Some(file_id)),
+        operation: Set("orphan_reconcile".to_owned()),
+        outcome: Set("success".to_owned()),
+        detail: Set(serde_json::json!({ "seed": "ancient" })),
+        occurred_at: Set(ancient),
+        published_at: Set(None),
+    };
+    secure_insert::<audit_outbox::Entity>(audit_am, &AccessScope::allow_all(), &conn)
+        .await
+        .expect("insert ancient audit_outbox row");
+
+    let event_event_id = Uuid::now_v7();
+    let events_am = events_outbox::ActiveModel {
+        event_id: Set(event_event_id),
+        tenant_id: Set(tenant_id),
+        owner_id: Set(Uuid::now_v7()),
+        file_id: Set(file_id),
+        event_type: Set("file.deleted".to_owned()),
+        payload: Set(serde_json::json!({ "seed": "ancient" })),
+        occurred_at: Set(ancient),
+        published_at: Set(None),
+    };
+    secure_insert::<events_outbox::Entity>(events_am, &AccessScope::allow_all(), &conn)
+        .await
+        .expect("insert ancient events_outbox row");
+
+    engine.run_sweep().await;
+
+    let audit_rows = audit_outbox::Entity::find()
+        .secure()
+        .scope_with(&AccessScope::allow_all())
+        .all(&conn)
+        .await
+        .expect("query audit_outbox directly");
+    assert!(
+        audit_rows.iter().any(|r| r.event_id == audit_event_id),
+        "unpublished audit_outbox row must survive the sweep regardless of age"
+    );
+
+    let event_rows = events_outbox::Entity::find()
+        .secure()
+        .scope_with(&AccessScope::allow_all())
+        .all(&conn)
+        .await
+        .expect("query events_outbox directly");
+    assert!(
+        event_rows.iter().any(|r| r.event_id == event_event_id),
+        "unpublished events_outbox row must survive the sweep regardless of age"
+    );
 }

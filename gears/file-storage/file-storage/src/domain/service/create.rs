@@ -56,12 +56,16 @@ impl FileService {
     /// propagated and the request is denied. A failing quota service is safer
     /// than silently allowing unbounded storage growth.
     ///
+    /// `op` labels the caller (`"create_file"` / `"presign_version"`) for the
+    /// `quota_denied` metric (P2 1.8 remediation).
+    ///
     /// @cpt-cf-file-storage-fr-storage-quota
     pub(super) async fn check_quota(
         &self,
         tenant_id: Uuid,
         owner_id: Uuid,
         effective_max_bytes: Option<u64>,
+        op: &str,
     ) -> Result<(), DomainError> {
         use crate::infra::external_clients::QuotaDecision;
         let Some(qc) = &self.quota_client else {
@@ -81,7 +85,10 @@ impl FileService {
             .await?
         {
             QuotaDecision::Allowed => Ok(()),
-            QuotaDecision::Denied { reason } => Err(DomainError::quota_exceeded(reason)),
+            QuotaDecision::Denied { reason } => {
+                self.metrics.record_quota_denied(op);
+                Err(DomainError::quota_exceeded(reason))
+            }
         }
     }
 
@@ -92,6 +99,7 @@ impl FileService {
     ///
     /// @cpt-cf-file-storage-fr-upload-idempotency
     /// @cpt-cf-file-storage-fr-audit-trail
+    #[tracing::instrument(skip_all)]
     pub async fn create_file(
         &self,
         ctx: &SecurityContext,
@@ -139,6 +147,7 @@ impl FileService {
                         .map_err(|_| {
                             DomainError::database("failed to deserialize idempotency body")
                         })?;
+                self.metrics.record_operation("create_file", "replayed");
                 return Ok(ticket);
             }
         }
@@ -171,7 +180,8 @@ impl FileService {
         PolicyResolver::check_metadata_limits(&policy, &initial_meta)?;
 
         // Quota preflight — pessimistic: check whether max allowed size fits quota.
-        self.check_quota(tenant_id, owner_id, effective_max).await?;
+        self.check_quota(tenant_id, owner_id, effective_max, "create_file")
+            .await?;
 
         let now = OffsetDateTime::now_utc();
         let file_id = Uuid::now_v7();
@@ -270,6 +280,7 @@ impl FileService {
             file_count_delta: 1,
         });
 
+        self.metrics.record_operation("create_file", "ok");
         Ok(ticket)
     }
 
@@ -312,7 +323,8 @@ impl FileService {
             backend.capabilities().max_size_bytes,
         );
 
-        self.check_quota(tenant_id, owner_id, effective_max).await?;
+        self.check_quota(tenant_id, owner_id, effective_max, "presign_version")
+            .await?;
 
         let now = OffsetDateTime::now_utc();
         let version_id = Uuid::now_v7();

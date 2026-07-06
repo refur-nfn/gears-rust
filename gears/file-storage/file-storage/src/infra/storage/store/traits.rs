@@ -95,6 +95,13 @@ impl CleanupStore for Store {
     ) -> Result<bool, DomainError> {
         Store::delete_file_with_event(self, scope, file_id, audit, event).await
     }
+
+    async fn delete_expired_idempotency_keys(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<u64, DomainError> {
+        Store::delete_expired_idempotency_keys(self, now).await
+    }
 }
 
 #[async_trait]
@@ -216,7 +223,11 @@ impl MultipartStore for Store {
         hash_value: Vec<u8>,
         audit: crate::domain::audit::AuditEntry,
     ) -> Result<bool, DomainError> {
-        Store::finalize_version(self, file_id, version_id, size, hash_value, audit).await
+        // `None`: the multipart-complete path does not perform MIME
+        // validation (out of scope for 1.10 — see `write.rs`'s
+        // `finalize_upload`/`finalize_upload_by_token` for the validated
+        // single-part finalize path), so the declared type is left untouched.
+        Store::finalize_version(self, file_id, version_id, size, hash_value, None, audit).await
     }
 
     async fn complete_multipart_upload(

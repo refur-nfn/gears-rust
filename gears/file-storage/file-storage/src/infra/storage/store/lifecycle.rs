@@ -135,4 +135,14 @@ impl Store {
             .list_all(&conn, &AccessScope::allow_all())
             .await
     }
+
+    /// Bulk-delete all `idempotency_keys` rows whose `expires_at` is at or
+    /// before `now` (P2 remediation 1.9). Returns the number of rows removed.
+    pub async fn delete_expired_idempotency_keys(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<u64, DomainError> {
+        let conn = self.db.conn().map_err(db_err)?;
+        self.repos.idempotency_keys.delete_expired(&conn, now).await
+    }
 }

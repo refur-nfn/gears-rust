@@ -14,10 +14,64 @@ use crate::domain::error::DomainError;
 use crate::domain::etag;
 use crate::domain::policy::PolicyResolver;
 use crate::domain::service::{FileService, VersionRef};
-use crate::infra::content::hash;
+use crate::infra::content::{hash, mime};
 use crate::infra::external_clients::UsageDelta;
 use crate::infra::signed_url::{Claims, Op, UploadConstraints};
 use crate::infra::storage::Store;
+
+/// Validate the read-back blob's actual bytes against the version's declared
+/// MIME type, reusing [`mime::validate`]'s magic-byte sniffing (the same logic
+/// the in-process data plane runs at ingress) rather than re-implementing it.
+///
+/// Returns the MIME type that should be persisted: the sniffed/canonical type
+/// when the bytes carry a recognizable signature, otherwise `declared_mime`
+/// unchanged (unrecognized content — e.g. plain text/CSV/custom binary — is
+/// not evidence of a mismatch, so it is accepted as declared).
+///
+/// A version with no declared MIME type (`declared_mime` empty) is passed
+/// through untouched: there is nothing to validate against, and unrestricted
+/// uploads must keep working exactly as before.
+///
+/// @cpt-cf-file-storage-fr-content-type-validation
+fn validate_and_resolve_mime(declared_mime: &str, blob: &[u8]) -> Result<String, DomainError> {
+    if declared_mime.is_empty() {
+        return Ok(declared_mime.to_owned());
+    }
+    mime::validate(declared_mime, blob)?;
+    Ok(mime::detect(blob).map_or_else(|| declared_mime.to_owned(), str::to_owned))
+}
+
+/// Re-enforce the per-MIME size ceiling against the **validated** type. The
+/// declared-type check runs earlier (before the blob is even read back); this
+/// second check closes the gap where a declared type with a generous — or
+/// unrestricted — ceiling would otherwise let bytes of a more tightly
+/// restricted true type slip through under it.
+///
+/// A no-op when `validated_mime` is the same string the earlier check already
+/// used (nothing new to enforce).
+fn enforce_size_ceiling_for_validated_mime(
+    policy: &crate::domain::policy::EffectivePolicy,
+    declared_mime: &str,
+    validated_mime: &str,
+    backend_max_bytes: Option<u64>,
+    actual_size: i64,
+) -> Result<(), DomainError> {
+    if validated_mime == declared_mime {
+        return Ok(());
+    }
+    let effective_max =
+        PolicyResolver::compute_effective_max_bytes(policy, validated_mime, backend_max_bytes);
+    if let Some(limit) = effective_max
+        && actual_size > 0
+        && actual_size.cast_unsigned() > limit
+    {
+        return Err(DomainError::policy_size_exceeded(
+            limit,
+            "policy size limit (true content type)",
+        ));
+    }
+    Ok(())
+}
 
 impl FileService {
     /// Authorize a write to `file_id` (WRITE action) without mutating anything.
@@ -43,6 +97,7 @@ impl FileService {
     /// the sidecar after streaming bytes to the backend (write action).
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
+    #[tracing::instrument(skip_all)]
     pub async fn finalize_upload(
         &self,
         ctx: &SecurityContext,
@@ -113,6 +168,22 @@ impl FileService {
         Store::verify_content_hash(&blob, &hash_value)?;
         let actual_hash = hash::sha256(&blob);
 
+        // Declared MIME type is never trustworthy either: validate the
+        // read-back blob's real bytes against `version_mime` (reusing the
+        // same magic-byte sniffing the in-process data plane runs at
+        // ingress), rejecting a mismatch before anything is finalized. The
+        // returned type is the sniffed/canonical one when the bytes carry a
+        // recognizable signature, otherwise the declared type unchanged.
+        // @cpt-cf-file-storage-fr-content-type-validation
+        let validated_mime = validate_and_resolve_mime(&version_mime, &blob)?;
+        enforce_size_ceiling_for_validated_mime(
+            &policy,
+            &version_mime,
+            &validated_mime,
+            backend.capabilities().max_size_bytes,
+            actual_size,
+        )?;
+
         // @cpt-cf-file-storage-fr-audit-trail
         let audit = Self::audit_ok(
             ctx,
@@ -124,10 +195,18 @@ impl FileService {
         // Persist the read-back-derived size/hash, not the caller's claim
         // (even though they have just been proven equal) — this is what
         // makes the positive test prove the read-back happened rather than
-        // merely re-asserting the caller's own input.
+        // merely re-asserting the caller's own input. `validated_mime` is
+        // persisted in place of the client's original declaration.
         let ok = self
             .store
-            .finalize_version(file_id, version_id, actual_size, actual_hash, audit)
+            .finalize_version(
+                file_id,
+                version_id,
+                actual_size,
+                actual_hash,
+                Some(validated_mime),
+                audit,
+            )
             .await?;
         if !ok {
             // Distinguish "already finalized" (409, using the `version`
@@ -140,6 +219,7 @@ impl FileService {
                 },
             );
         }
+        self.metrics.record_operation("finalize_upload", "ok");
         Ok(())
     }
 
@@ -152,6 +232,7 @@ impl FileService {
     /// reverses the ETag back to a `content_id`.
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
+    #[tracing::instrument(skip_all)]
     pub async fn bind(
         &self,
         ctx: &SecurityContext,
@@ -241,7 +322,9 @@ impl FileService {
             ));
         }
 
-        self.store.require_file(&scope, file_id).await
+        let bound = self.store.require_file(&scope, file_id).await?;
+        self.metrics.record_operation("bind", "ok");
+        Ok(bound)
     }
 
     /// Issue a signed download URL for a version (shared helper used by
@@ -455,6 +538,7 @@ impl FileService {
     /// actor id, since no user identity is present in a sidecar callback.
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
+    #[tracing::instrument(skip_all)]
     pub async fn finalize_upload_by_token(
         &self,
         claims: &Claims,
@@ -526,6 +610,22 @@ impl FileService {
         Store::verify_content_hash(&blob, &hash_value)?;
         let actual_hash = hash::sha256(&blob);
 
+        // Declared MIME type is never trustworthy either: validate the
+        // read-back blob's real bytes against `version_mime` (reusing the
+        // same magic-byte sniffing the in-process data plane runs at
+        // ingress), rejecting a mismatch before anything is finalized. The
+        // returned type is the sniffed/canonical one when the bytes carry a
+        // recognizable signature, otherwise the declared type unchanged.
+        // @cpt-cf-file-storage-fr-content-type-validation
+        let validated_mime = validate_and_resolve_mime(&version_mime, &blob)?;
+        enforce_size_ceiling_for_validated_mime(
+            &policy,
+            &version_mime,
+            &validated_mime,
+            backend.capabilities().max_size_bytes,
+            actual_size,
+        )?;
+
         // @cpt-cf-file-storage-fr-audit-trail
         // Actor is "sidecar" with nil UUID — no user identity is available in
         // a token-authenticated callback.
@@ -539,9 +639,18 @@ impl FileService {
         );
 
         // Persist the read-back-derived size/hash, not the caller's claim.
+        // `validated_mime` is persisted in place of the client's original
+        // declaration.
         let ok = self
             .store
-            .finalize_version(file_id, version_id, actual_size, actual_hash, audit)
+            .finalize_version(
+                file_id,
+                version_id,
+                actual_size,
+                actual_hash,
+                Some(validated_mime),
+                audit,
+            )
             .await?;
         if !ok {
             // Distinguish "already finalized" (409, using the `version`
@@ -554,6 +663,8 @@ impl FileService {
                 },
             );
         }
+        self.metrics
+            .record_operation("finalize_upload_by_token", "ok");
         Ok(())
     }
 
@@ -564,6 +675,7 @@ impl FileService {
             return;
         };
         if let Err(err) = backend.delete(path).await {
+            self.metrics.record_backend_error(backend_id, "delete");
             tracing::warn!(?err, path, "best-effort backend delete failed");
         }
     }

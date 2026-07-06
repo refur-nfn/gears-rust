@@ -94,15 +94,24 @@ fn ctx(tenant: Uuid) -> SecurityContext {
 }
 
 fn new_file() -> NewFile {
+    new_file_with_mime("application/octet-stream")
+}
+
+fn new_file_with_mime(mime_type: &str) -> NewFile {
     NewFile {
         owner_kind: OwnerKind::User,
         owner_id: Uuid::now_v7(),
         name: "finalize.bin".to_owned(),
         gts_file_type: GTS.to_owned(),
-        mime_type: "application/octet-stream".to_owned(),
+        mime_type: mime_type.to_owned(),
         custom_metadata: vec![],
     }
 }
+
+// Minimal PNG signature (8-byte magic) — recognized by `infer` as `image/png`.
+const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+// `%PDF-1.4` header — recognized by `infer` as `application/pdf`.
+const PDF_MAGIC: &[u8] = b"%PDF-1.4\n";
 
 /// The canonical backend path a pending version is created at
 /// (mirrors `FileService::backend_path`, `pub(super)` so not directly
@@ -263,6 +272,7 @@ async fn finalize_by_token_without_prior_put_is_rejected() {
         exp: time::OffsetDateTime::now_utc().unix_timestamp() + 3600,
         upload: UploadConstraints::default(),
         multipart: MultipartClaims::default(),
+        request_id: "test-request-id".to_owned(),
     };
 
     let err = svc
@@ -338,13 +348,21 @@ async fn version_repo_finalize_twice_second_call_returns_false() {
     let hash_b = hash::sha256(b"second-call-bytes");
 
     let first = repo
-        .finalize(&conn, &scope, file_id, version_id, 100, hash_a.clone())
+        .finalize(
+            &conn,
+            &scope,
+            file_id,
+            version_id,
+            100,
+            hash_a.clone(),
+            None,
+        )
         .await
         .expect("first finalize call");
     assert!(first, "first finalize call on a pending row must succeed");
 
     let second = repo
-        .finalize(&conn, &scope, file_id, version_id, 200, hash_b)
+        .finalize(&conn, &scope, file_id, version_id, 200, hash_b, None)
         .await
         .expect("second finalize call");
     assert!(
@@ -424,4 +442,102 @@ async fn finalize_upload_after_already_available_returns_conflict() {
     assert_eq!(version.status, VersionStatus::Available);
     assert_eq!(version.size, true_size);
     assert_eq!(version.hash_value, true_hash);
+}
+
+// -- 8. finalize_upload: content not matching the declared MIME is rejected -
+// (P2 1.10 — declared MIME is validated against the read-back blob)
+
+#[tokio::test]
+async fn finalize_rejects_content_not_matching_declared_mime() {
+    let (svc, backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc
+        .create_file(&ctx, new_file_with_mime("image/png"), None)
+        .await
+        .unwrap();
+
+    // Presigned/declared as `image/png`, but the bytes actually uploaded are
+    // a recognizably different signature (PDF) — a policy-bypass attempt.
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend
+        .put(&path, Bytes::from_static(PDF_MAGIC))
+        .await
+        .unwrap();
+
+    let true_size = i64::try_from(PDF_MAGIC.len()).unwrap();
+    let true_hash = hash::sha256(PDF_MAGIC);
+
+    let err = svc
+        .finalize_upload(
+            &ctx,
+            ticket.file_id,
+            ticket.version_id,
+            true_size,
+            true_hash,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::MimeMismatch { .. }),
+        "expected MimeMismatch, got {err:?}"
+    );
+
+    // The version must NOT have been finalized: still pending, not available.
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must still exist");
+    assert_eq!(version.status, VersionStatus::Pending);
+    assert_eq!(
+        version.mime_type, "image/png",
+        "declared mime is untouched by a rejected finalize"
+    );
+}
+
+// -- 9. finalize_upload: matching content persists the validated MIME -------
+// (P2 1.10 — positive control: stored mime_type is the sniffed/canonical
+// type, not merely the client's literal declared string)
+
+#[tokio::test]
+async fn finalize_persists_validated_mime() {
+    let (svc, backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    // Declare with a `charset` parameter that the SNIFFED canonical type will
+    // not carry, so a passing assertion on the stored value proves the
+    // *validated* type was persisted rather than the raw declared string.
+    let ticket = svc
+        .create_file(&ctx, new_file_with_mime("image/png; charset=binary"), None)
+        .await
+        .unwrap();
+
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend
+        .put(&path, Bytes::from_static(PNG_MAGIC))
+        .await
+        .unwrap();
+
+    let true_size = i64::try_from(PNG_MAGIC.len()).unwrap();
+    let true_hash = hash::sha256(PNG_MAGIC);
+
+    svc.finalize_upload(
+        &ctx,
+        ticket.file_id,
+        ticket.version_id,
+        true_size,
+        true_hash,
+    )
+    .await
+    .unwrap();
+
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must exist");
+    assert_eq!(version.status, VersionStatus::Available);
+    assert_eq!(
+        version.mime_type, "image/png",
+        "stored mime_type must be the sniffed canonical type, not the declared string verbatim"
+    );
 }

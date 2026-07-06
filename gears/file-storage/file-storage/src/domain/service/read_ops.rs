@@ -94,6 +94,7 @@ impl FileService {
 
     /// `GET /files/{id}/download-url`: issue a signed download URL pinned to the
     /// current content (or a specific `version_id`).
+    #[tracing::instrument(skip_all)]
     pub async fn download_url(
         &self,
         ctx: &SecurityContext,
@@ -127,6 +128,7 @@ impl FileService {
 
         let download_url =
             self.build_download_url(file_id, target, version.backend_id, version.backend_path)?;
+        self.metrics.record_operation("download_url", "ok");
         Ok(DownloadTicket {
             download_url,
             etag: etag::content_etag(file_id, target),
@@ -170,6 +172,7 @@ impl FileService {
     /// to delete unconditionally when the ETag is unknown.
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
+    #[tracing::instrument(skip_all)]
     pub async fn delete_file(
         &self,
         ctx: &SecurityContext,
@@ -201,7 +204,9 @@ impl FileService {
             }
         }
 
-        self.delete_file_inner(ctx, file_id).await
+        self.delete_file_inner(ctx, file_id).await?;
+        self.metrics.record_operation("delete_file", "ok");
+        Ok(())
     }
 
     /// Inner (unconditional) file deletion: authorization and If-Match must have
@@ -273,6 +278,7 @@ impl FileService {
     /// is equivalent to deleting the file.
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
+    #[tracing::instrument(skip_all)]
     pub async fn delete_version(
         &self,
         ctx: &SecurityContext,
@@ -294,7 +300,9 @@ impl FileService {
             // Last version → delete the whole file. Authorization has already been
             // checked above; skip the If-Match gate (delete_version has its own
             // contract — no If-Match on DELETE /files/{id}/versions/{vid}).
-            return self.delete_file_inner(ctx, file_id).await;
+            self.delete_file_inner(ctx, file_id).await?;
+            self.metrics.record_operation("delete_version", "ok");
+            return Ok(());
         }
         let Some(version) = all.into_iter().find(|v| v.version_id == version_id) else {
             return Err(DomainError::version_not_found(file_id, version_id));
@@ -318,6 +326,7 @@ impl FileService {
             .await?;
         self.best_effort_blob_delete(&version.backend_id, &version.backend_path)
             .await;
+        self.metrics.record_operation("delete_version", "ok");
         Ok(())
     }
 }

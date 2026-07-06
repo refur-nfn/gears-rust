@@ -97,6 +97,16 @@ pub struct Claims {
     /// Non-empty only when `op = multipart_part`.
     #[serde(default, skip_serializing_if = "is_default_multipart")]
     pub multipart: MultipartClaims,
+    /// Opaque correlation id minted at issuance time (P2 1.8 remediation).
+    ///
+    /// Carried end-to-end through the signed token so the sidecar can echo it
+    /// back as the `x-request-id` header on its finalize/report-part callback
+    /// to the control plane, letting both planes' logs be correlated by the
+    /// same id even though the callback arrives on a disconnected HTTP
+    /// request from the one that issued the token. `#[serde(default)]` keeps
+    /// verification tolerant of a token minted before this field existed.
+    #[serde(default)]
+    pub request_id: String,
 }
 
 fn is_default_constraints(c: &UploadConstraints) -> bool {

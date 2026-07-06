@@ -20,10 +20,11 @@ use crate::domain::cleanup::{CleanupConfig, CleanupEngine};
 use crate::domain::local_client::FileStorageLocalClient;
 use crate::domain::multipart_service::MultipartService;
 use crate::domain::policy_service::PolicyService;
-use crate::domain::ports::{CleanupStore, MultipartStore, PolicyStore};
+use crate::domain::ports::{CleanupStore, FileStorageMetricsPort, MultipartStore, PolicyStore};
 use crate::domain::service::{FileService, ServiceConfig};
 use crate::infra::authz::PolicyEnforcerAuthorizer;
 use crate::infra::backend::{BackendRegistry, InMemoryBackend, LocalFsBackend, StorageBackend};
+use crate::infra::metrics::FileStorageMetricsMeter;
 use crate::infra::signed_url::Issuer;
 use crate::infra::storage::Store;
 
@@ -118,6 +119,16 @@ impl Gear for FileStorageGear {
             idempotency_ttl_secs: cfg.idempotency_ttl_secs,
         };
 
+        // P2 1.8 remediation: OTel Meter obtained via meter_with_scope, mirroring
+        // mini-chat's `infra::metrics::MiniChatMetricsMeter` wiring pattern
+        // (gears/mini-chat/mini-chat/src/gear.rs).
+        let metrics_scope =
+            opentelemetry::InstrumentationScope::builder(Self::MODULE_NAME.to_owned()).build();
+        let metrics: Arc<dyn FileStorageMetricsPort> = Arc::new(FileStorageMetricsMeter::new(
+            &opentelemetry::global::meter_with_scope(metrics_scope),
+            "file_storage",
+        ));
+
         let store = Store::new(Arc::clone(&db));
 
         // Upcast to the narrow capability traits before distributing.
@@ -134,28 +145,34 @@ impl Gear for FileStorageGear {
         // TODO(P2): wire the quota-enforcement client once the Quota Enforcement
         // gear exposes an SDK crate. For now, no quota checks are performed.
         // TODO(P2-M5): wire the usage reporter once a Usage Collector SDK is available.
-        let service = Arc::new(FileService::new(
-            store,
-            backends.clone(),
-            Arc::clone(&issuer),
-            Arc::clone(&authorizer),
-            svc_cfg,
-            None, // quota_client
-            None, // usage_reporter
-        ));
+        let service = Arc::new(
+            FileService::new(
+                store,
+                backends.clone(),
+                Arc::clone(&issuer),
+                Arc::clone(&authorizer),
+                svc_cfg,
+                None, // quota_client
+                None, // usage_reporter
+            )
+            .with_metrics(Arc::clone(&metrics)),
+        );
         self.service
             .set(Arc::clone(&service))
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
 
-        let multipart_svc = Arc::new(MultipartService::new(
-            multipart_store,
-            backends,
-            Arc::clone(&authorizer),
-            None, // quota_client
-            Arc::clone(&issuer),
-            sidecar_base_url,
-            url_ttl_secs,
-        ));
+        let multipart_svc = Arc::new(
+            MultipartService::new(
+                multipart_store,
+                backends,
+                Arc::clone(&authorizer),
+                None, // quota_client
+                Arc::clone(&issuer),
+                sidecar_base_url,
+                url_ttl_secs,
+            )
+            .with_metrics(Arc::clone(&metrics)),
+        );
         self.multipart_service.set(multipart_svc).map_err(|_| {
             anyhow::anyhow!(
                 "{} multipart service already initialized",
@@ -168,8 +185,9 @@ impl Gear for FileStorageGear {
             anyhow::anyhow!("{} policy service already initialized", Self::MODULE_NAME)
         })?;
 
-        // Optional background cleanup sweep (disabled by default so tests are
-        // deterministic; enable via `enable_background_sweep = true` in config).
+        // Optional background cleanup sweep (enabled by default; config-driven
+        // test/dev harnesses that need deterministic behavior must explicitly
+        // set `enable_background_sweep = false`).
         if cfg.enable_background_sweep {
             let sweep_secs = cfg.sweep_interval_secs;
             let engine = Arc::new(CleanupEngine::new(
@@ -179,11 +197,20 @@ impl Gear for FileStorageGear {
                     orphan_grace_secs: cfg.orphan_grace_secs,
                 },
             ));
+            let sweep_metrics = Arc::clone(&metrics);
             tokio::spawn(async move {
                 let interval = tokio::time::Duration::from_secs(sweep_secs);
                 loop {
                     tokio::time::sleep(interval).await;
                     let result = engine.run_sweep().await;
+                    // P2 1.8 remediation: export the same tallies as metrics
+                    // counters at the point they are already logged.
+                    sweep_metrics.record_sweep_result(
+                        u64::try_from(result.abandoned_pending_deleted).unwrap_or(u64::MAX),
+                        u64::try_from(result.expired_multipart_aborted).unwrap_or(u64::MAX),
+                        u64::try_from(result.retention_expired_deleted).unwrap_or(u64::MAX),
+                        result.idempotency_keys_deleted,
+                    );
                     tracing::info!(?result, "file-storage cleanup sweep completed");
                 }
             });

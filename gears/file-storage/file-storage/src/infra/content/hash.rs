@@ -38,6 +38,22 @@ pub fn sha256_parts(parts: &[&[u8]]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+/// Convert a SHA-256 digest (`sha256`/`sha256_parts`/`Hasher::finalize` all
+/// return a `Vec<u8>` for historical/allocation reasons) into a fixed-size
+/// array, for call sites (e.g. `StorageBackend::put_stream`) that want a
+/// `Copy`-able, statically-sized digest type instead.
+///
+/// # Panics
+/// Panics if `digest` is not exactly 32 bytes. This is an internal-invariant
+/// check, not a reachable runtime condition: every digest producer in this
+/// module is SHA-256, which always yields 32 bytes.
+#[must_use]
+pub fn digest_to_array(digest: Vec<u8>) -> [u8; 32] {
+    digest
+        .try_into()
+        .unwrap_or_else(|v: Vec<u8>| panic!("SHA-256 digest must be 32 bytes, got {}", v.len()))
+}
+
 /// A streaming SHA-256 accumulator for chunked uploads.
 #[derive(Default)]
 pub struct Hasher {

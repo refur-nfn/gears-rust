@@ -15,6 +15,7 @@ fn sample_claims(op: Op, exp: i64) -> Claims {
         exp,
         upload: UploadConstraints::default(),
         multipart: MultipartClaims::default(),
+        request_id: "test-request-id".to_owned(),
     }
 }
 

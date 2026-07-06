@@ -113,6 +113,7 @@ impl VersionRepo {
 
     /// Record the streamed content's size and hash and mark the version
     /// `available` (the sidecar calls this after durably writing the bytes).
+    #[allow(clippy::too_many_arguments)]
     pub async fn finalize<C: DBRunner>(
         &self,
         conn: &C,
@@ -121,16 +122,24 @@ impl VersionRepo {
         version_id: Uuid,
         size: i64,
         hash_value: Vec<u8>,
+        mime_type: Option<String>,
     ) -> Result<bool, DomainError> {
         // Scope the update to the full `(file_id, version_id)` key so a
         // version_id that belongs to a different file cannot be finalized here.
-        let res = Entity::update_many()
+        let mut update = Entity::update_many()
             .col_expr(Column::Size, Expr::value(size))
             .col_expr(Column::HashValue, Expr::value(hash_value))
             .col_expr(
                 Column::Status,
                 Expr::value(file_storage_sdk::VersionStatus::Available.as_str()),
-            )
+            );
+        // `mime_type` is only rewritten when the caller has a validated/sniffed
+        // type to persist (single-part finalize); the multipart-complete path
+        // passes `None` and leaves the declared type untouched.
+        if let Some(mime_type) = mime_type {
+            update = update.col_expr(Column::MimeType, Expr::value(mime_type));
+        }
+        let res = update
             .filter(
                 Condition::all()
                     .add(Column::FileId.eq(file_id))

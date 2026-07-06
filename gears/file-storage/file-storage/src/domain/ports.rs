@@ -106,6 +106,13 @@ pub trait CleanupStore: Send + Sync {
         audit: AuditEntry,
         event: Option<FileEvent>,
     ) -> Result<bool, DomainError>;
+
+    /// Bulk-delete all `idempotency_keys` rows whose `expires_at` is at or
+    /// before `now`. Returns the number of rows removed.
+    async fn delete_expired_idempotency_keys(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<u64, DomainError>;
 }
 
 // ── MultipartStore ────────────────────────────────────────────────────────────
@@ -337,4 +344,58 @@ pub trait DataPlanePort: Send + Sync {
         size: i64,
         hash_value: Vec<u8>,
     ) -> Result<(), DomainError>;
+}
+
+// ── FileStorageMetricsPort ──────────────────────────────────────────────────────
+
+/// Metrics port (P2 1.8 remediation — zero metrics/observability).
+///
+/// Follows the platform's established `OTel` `Meter`-method-API pattern (mirrors
+/// `gears/mini-chat/mini-chat/src/domain/ports.rs`'s `MiniChatMetricsPort` /
+/// `infra/metrics.rs`'s `MiniChatMetricsMeter`) rather than the `metrics`-crate
+/// macros. `crate::infra::metrics::FileStorageMetricsMeter` is the sole
+/// OTel-backed implementation, obtained via `opentelemetry::global::meter_with_scope`
+/// once per process — `gear.rs` for the control plane, `bin/sidecar.rs` for the
+/// data plane. `crate::infra::metrics::NoopMetrics` is the default so every
+/// existing `FileService::new` / `MultipartService::new` call site (used
+/// throughout the integration-test suite) keeps compiling unchanged; real
+/// wiring is opted into via `.with_metrics(...)`.
+pub trait FileStorageMetricsPort: Send + Sync {
+    /// Record a control-plane service-entry-point outcome, e.g.
+    /// `record_operation("create_file", "ok")` / `("bind", "denied")` /
+    /// `("finalize_upload", "error")`.
+    fn record_operation(&self, op: &str, result: &str);
+
+    /// Record a storage-backend operation failure (`backend_id`, `op`).
+    fn record_backend_error(&self, backend_id: &str, op: &str);
+
+    /// Record a quota-enforcement denial for `op` (e.g. `"create_file"`,
+    /// `"initiate_multipart_upload"`).
+    fn record_quota_denied(&self, op: &str);
+
+    /// Record one background cleanup sweep's tallies — mirrors
+    /// `cleanup::SweepResult`'s four counters (the fourth,
+    /// `idempotency_keys_deleted`, landed in the P2 1.9 remediation).
+    fn record_sweep_result(
+        &self,
+        abandoned_pending_deleted: u64,
+        expired_multipart_aborted: u64,
+        retention_expired_deleted: u64,
+        idempotency_keys_deleted: u64,
+    );
+
+    /// Record bytes received from a client upload (sidecar ingress).
+    fn record_ingress_bytes(&self, bytes: f64);
+
+    /// Record bytes served to a client download (sidecar egress).
+    fn record_egress_bytes(&self, bytes: f64);
+
+    /// Record one sidecar HTTP request's route/method/status/latency.
+    ///
+    /// The control plane's own REST routes already get
+    /// `http.server.request.duration` from the platform's api-gateway
+    /// (`gears/system/api-gateway/src/middleware/http_metrics.rs`, applied to
+    /// every proxied gear route) — this port method is only wired at the
+    /// sidecar, a standalone process the gateway never proxies.
+    fn record_request(&self, route: &str, method: &str, status: u16, latency_ms: f64);
 }

@@ -48,6 +48,8 @@ pub struct SweepResult {
     pub expired_multipart_aborted: usize,
     /// Number of files deleted because a retention rule triggered.
     pub retention_expired_deleted: usize,
+    /// Number of expired `idempotency_keys` rows deleted.
+    pub idempotency_keys_deleted: u64,
 }
 
 /// The cleanup engine -- orchestrates the background sweep.
@@ -92,6 +94,9 @@ impl CleanupEngine {
     ///    the orphan grace window).
     /// 2. Expired multipart sessions (`expires_at < now`, still `in_progress`).
     /// 3. Retention-policy expiry (age / inactivity / metadata rules, all scopes).
+    /// 4. Expired idempotency-key rows (`expires_at <= now`). `audit_outbox`/
+    ///    `events_outbox` rows are deliberately left untouched -- see the
+    ///    inline comment at the call site.
     ///
     /// Cross-instance coordination is deliberately absent in P2. The sweep is
     /// idempotent: concurrent sweeps on the same data produce at most one
@@ -100,6 +105,7 @@ impl CleanupEngine {
     ///
     /// @cpt-cf-file-storage-fr-orphan-reconciliation
     /// @cpt-cf-file-storage-fr-retention-policies
+    #[tracing::instrument(skip_all)]
     pub async fn run_sweep(&self) -> SweepResult {
         let mut result = SweepResult::default();
         let now = OffsetDateTime::now_utc();
@@ -115,6 +121,20 @@ impl CleanupEngine {
 
         // Step 3 -- retention-policy expiry.
         result.retention_expired_deleted += self.sweep_retention_expiry(now).await;
+
+        // Step 4 -- expired idempotency-key rows (P2 remediation 1.9). The
+        // `audit_outbox`/`events_outbox` tables are deliberately NOT swept
+        // here: `published_at` stays `NULL` until the Tier 4 EventBroker
+        // relay exists, so a row-age-based purge would silently drop rows
+        // that were never delivered.
+        result.idempotency_keys_deleted += self
+            .store
+            .delete_expired_idempotency_keys(now)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = ?e, "cleanup: failed to delete expired idempotency keys");
+                0
+            });
 
         result
     }
