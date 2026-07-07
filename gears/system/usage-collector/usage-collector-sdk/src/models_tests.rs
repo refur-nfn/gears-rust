@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 
+use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use serde_json::json;
 use toolkit_gts::{GTS_ID_PREFIX, gts_id};
@@ -11,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     AggregationBucket, AggregationDimension, AggregationOp, AggregationResult, AggregationSpec,
-    IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef, SubjectRef, UsageKind, UsageRecord,
-    UsageRecordStatus, UsageType, UsageTypeGtsId,
+    CreateUsageRecord, IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef, SubjectRef,
+    UsageKind, UsageRecord, UsageRecordStatus, UsageType, UsageTypeGtsId,
 };
 use crate::error::UsageCollectorError;
 use crate::reason::ValidationReason;
@@ -49,7 +50,7 @@ fn sample_usage_type() -> UsageType {
 
 fn sample_usage_record(subject_ref: Option<SubjectRef>, corrects_id: Option<Uuid>) -> UsageRecord {
     UsageRecord {
-        uuid: Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("record uuid"),
+        id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("record id"),
         gts_id: sample_id(),
         tenant_id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("tenant uuid"),
         resource_ref: ResourceRef::new("vm-1", "compute.vm").expect("valid resource ref"),
@@ -61,6 +62,86 @@ fn sample_usage_record(subject_ref: Option<SubjectRef>, corrects_id: Option<Uuid
         status: UsageRecordStatus::Active,
         created_at: time::OffsetDateTime::from_unix_timestamp(0).expect("epoch"),
     }
+}
+
+fn sample_create_usage_record(
+    subject_ref: Option<SubjectRef>,
+    corrects_id: Option<Uuid>,
+) -> CreateUsageRecord {
+    CreateUsageRecord {
+        gts_id: sample_id(),
+        tenant_id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("tenant uuid"),
+        resource_ref: ResourceRef::new("vm-1", "compute.vm").expect("valid resource ref"),
+        subject_ref,
+        metadata: metadata_map([("region", "eu"), ("tier", "gold")]),
+        value: Decimal::from(42),
+        idempotency_key: IdempotencyKey::new("k-1").expect("valid idempotency key"),
+        corrects_id,
+        created_at: time::OffsetDateTime::from_unix_timestamp(0).expect("epoch"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CreateUsageRecord::into_usage_record — identity stamp on create
+// ---------------------------------------------------------------------------
+
+// `into_usage_record` is the single point where a submission acquires its
+// identity: it stamps the deterministic derived `id`, initializes `status`
+// to `Active`, and forwards every caller-supplied field verbatim.
+#[test]
+fn into_usage_record_stamps_derived_id_and_active_status() {
+    let subject = SubjectRef::new("sub-1", Some("user".to_owned())).expect("valid subject ref");
+    let corrects = Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("corrects uuid");
+    let input = sample_create_usage_record(Some(subject), Some(corrects));
+
+    let expected_id =
+        crate::id::derive_usage_record_id(input.tenant_id, &input.gts_id, &input.idempotency_key);
+
+    let record = input.clone().into_usage_record();
+
+    assert_eq!(
+        record.id, expected_id,
+        "id must be the deterministic derivation of the dedup key",
+    );
+    assert_eq!(
+        record.status,
+        UsageRecordStatus::Active,
+        "a fresh submission must be stamped Active",
+    );
+    // Every caller-supplied field is forwarded verbatim.
+    assert_eq!(record.gts_id, input.gts_id);
+    assert_eq!(record.tenant_id, input.tenant_id);
+    assert_eq!(record.resource_ref, input.resource_ref);
+    assert_eq!(record.subject_ref, input.subject_ref);
+    assert_eq!(record.metadata, input.metadata);
+    assert_eq!(record.value, input.value);
+    assert_eq!(record.idempotency_key, input.idempotency_key);
+    assert_eq!(record.corrects_id, input.corrects_id);
+    assert_eq!(record.created_at, input.created_at);
+}
+
+// A submission whose dedup key matches an existing `UsageRecord` projects to
+// the SAME `id` that record carries — the derivation is a pure function of
+// `(tenant_id, gts_id, idempotency_key)`, so the create input and the
+// persisted shape agree on identity without the caller ever supplying it.
+#[test]
+fn into_usage_record_id_matches_full_record_with_same_dedup_key() {
+    let input = sample_create_usage_record(None, None);
+    let persisted = sample_usage_record(None, None);
+    // `sample_usage_record` shares the same tenant / gts_id / idempotency_key.
+    assert_eq!(input.tenant_id, persisted.tenant_id);
+    assert_eq!(input.gts_id, persisted.gts_id);
+    assert_eq!(input.idempotency_key, persisted.idempotency_key);
+
+    assert_eq!(
+        input.into_usage_record().id,
+        crate::id::derive_usage_record_id(
+            persisted.tenant_id,
+            &persisted.gts_id,
+            &persisted.idempotency_key,
+        ),
+        "the create-input identity must equal the derivation of the same dedup key",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +708,7 @@ fn aggregation_result_carries_empty_key_for_no_grouping() {
     let result = AggregationResult {
         buckets: vec![AggregationBucket {
             key: Vec::new(),
-            value: Some(Decimal::from(42)),
+            value: Some(BigDecimal::from(42)),
         }],
     };
     let value = serde_json::to_value(&result).expect("serialize");
@@ -649,7 +730,7 @@ fn aggregation_bucket_key_is_vec_of_strings() {
             "00000000-0000-0000-0000-000000000001".to_owned(),
             "us-east-1".to_owned(),
         ],
-        value: Some(Decimal::from(7)),
+        value: Some(BigDecimal::from(7)),
     };
     let value = serde_json::to_value(&bucket).expect("serialize");
     assert_eq!(
@@ -673,7 +754,7 @@ fn aggregation_bucket_tenant_id_uses_canonical_uuid_string() {
     let tenant = Uuid::parse_str("0123456789ABCDEF0123456789ABCDEF").expect("tenant uuid");
     let bucket = AggregationBucket {
         key: vec![tenant.to_string()],
-        value: Some(Decimal::from(1)),
+        value: Some(BigDecimal::from(1)),
     };
     let value = serde_json::to_value(&bucket).expect("serialize");
     assert_eq!(
@@ -694,6 +775,36 @@ fn aggregation_bucket_carries_none_value_for_empty_aggregation() {
     };
     let value = serde_json::to_value(&bucket).expect("serialize");
     assert_eq!(value, json!({"value": null}));
+    let decoded: AggregationBucket = serde_json::from_value(value).expect("round-trip");
+    assert_eq!(decoded, bucket);
+}
+
+#[test]
+fn aggregation_bucket_value_above_rust_decimal_ceiling_round_trips() {
+    // 2^96 rounded up — beyond rust_decimal's ~7.9e28 ceiling, so this would
+    // 500 under the old `Decimal` carrier. It must round-trip exactly now.
+    let big = "79228162514264337593543950400";
+    let bucket = AggregationBucket {
+        key: Vec::new(),
+        value: Some(big.parse::<BigDecimal>().expect("bigdecimal parses")),
+    };
+    let value = serde_json::to_value(&bucket).expect("serialize");
+    assert_eq!(value, json!({ "value": "79228162514264337593543950400" }));
+    let decoded: AggregationBucket = serde_json::from_value(value).expect("round-trip");
+    assert_eq!(decoded, bucket);
+}
+
+#[test]
+fn aggregation_bucket_negative_value_round_trips() {
+    // Compensation rows carry negative magnitudes (and can net to zero) —
+    // widening the carrier to BigDecimal is motivated exactly by this path.
+    // The sign must survive the string wire encoding round-trip.
+    let bucket = AggregationBucket {
+        key: Vec::new(),
+        value: Some(BigDecimal::from(-42)),
+    };
+    let value = serde_json::to_value(&bucket).expect("serialize");
+    assert_eq!(value, json!({ "value": "-42" }));
     let decoded: AggregationBucket = serde_json::from_value(value).expect("round-trip");
     assert_eq!(decoded, bucket);
 }
@@ -1162,5 +1273,101 @@ fn usage_record_query_filter_surface_rejects_gts_id_inside_composite() {
             toolkit_odata::filter::FilterError::UnknownField(name) if name == "gts_id"
         ),
         "expected UnknownField(\"gts_id\"), got {err:?}",
+    );
+}
+
+#[test]
+fn aggregation_op_is_allowed_for_counter() {
+    // Counter allows {SUM, COUNT}; rejects MIN/MAX/AVG.
+    assert!(AggregationOp::Sum.is_allowed_for(UsageKind::Counter));
+    assert!(AggregationOp::Count.is_allowed_for(UsageKind::Counter));
+    assert!(!AggregationOp::Min.is_allowed_for(UsageKind::Counter));
+    assert!(!AggregationOp::Max.is_allowed_for(UsageKind::Counter));
+    assert!(!AggregationOp::Avg.is_allowed_for(UsageKind::Counter));
+}
+
+#[test]
+fn aggregation_op_is_allowed_for_gauge() {
+    // Gauge allows {MIN, MAX, AVG, COUNT}; rejects SUM.
+    assert!(!AggregationOp::Sum.is_allowed_for(UsageKind::Gauge));
+    assert!(AggregationOp::Count.is_allowed_for(UsageKind::Gauge));
+    assert!(AggregationOp::Min.is_allowed_for(UsageKind::Gauge));
+    assert!(AggregationOp::Max.is_allowed_for(UsageKind::Gauge));
+    assert!(AggregationOp::Avg.is_allowed_for(UsageKind::Gauge));
+}
+
+#[test]
+fn aggregation_op_not_allowed_for_kind_builds_invalid_argument() {
+    let gts_id = UsageTypeGtsId::new(gts_id!(
+        "cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1"
+    ))
+    .expect("valid gts_id");
+
+    let err = crate::UsageCollectorError::aggregation_op_not_allowed_for_kind(
+        AggregationOp::Sum,
+        UsageKind::Gauge,
+        &gts_id,
+    );
+
+    match err {
+        crate::UsageCollectorError::InvalidArgument {
+            field,
+            reason,
+            resource_name,
+            detail,
+            ..
+        } => {
+            assert_eq!(field, "aggregation.op");
+            assert_eq!(reason, crate::reason::ValidationReason::OpNotAllowedForKind);
+            assert_eq!(resource_name.as_deref(), Some(gts_id.as_ref()));
+            // `detail` is the user-facing 400 message; a broken op→text or
+            // kind→allowed-set branch would otherwise ship silently. Pin the
+            // offending op, the rejecting kind, and that kind's allowed set.
+            assert!(
+                detail.contains("`sum`"),
+                "detail must name the offending op; got {detail:?}"
+            );
+            assert!(
+                detail.contains("gauge"),
+                "detail must name the rejecting kind; got {detail:?}"
+            );
+            assert!(
+                detail.contains("min, max, avg, count"),
+                "detail must name the gauge allowed-op set; got {detail:?}"
+            );
+        }
+        other => panic!("expected InvalidArgument, got {other:?}"),
+    }
+}
+
+#[test]
+fn aggregation_op_not_allowed_for_kind_counter_detail_names_op_kind_and_allowed_set() {
+    let gts_id = UsageTypeGtsId::new(gts_id!(
+        "cf.core.uc.usage_record.v1~cf.mini_chat._.tokens_consumed.v1"
+    ))
+    .expect("valid gts_id");
+
+    // Min on a counter exercises the other kind→allowed-set branch
+    // (counter → {sum, count}) and a distinct op→text mapping (Min → "min").
+    let err = crate::UsageCollectorError::aggregation_op_not_allowed_for_kind(
+        AggregationOp::Min,
+        UsageKind::Counter,
+        &gts_id,
+    );
+
+    let crate::UsageCollectorError::InvalidArgument { detail, .. } = err else {
+        panic!("expected InvalidArgument, got {err:?}");
+    };
+    assert!(
+        detail.contains("`min`"),
+        "detail must name the offending op; got {detail:?}"
+    );
+    assert!(
+        detail.contains("counter"),
+        "detail must name the rejecting kind; got {detail:?}"
+    );
+    assert!(
+        detail.contains("sum, count"),
+        "detail must name the counter allowed-op set; got {detail:?}"
     );
 }

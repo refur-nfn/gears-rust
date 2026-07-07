@@ -13,6 +13,10 @@ fn validation_reason_round_trips_each_constant() {
             GAUGE_COMPENSATION_REJECTED,
             ValidationReason::GaugeCompensationRejected,
         ),
+        (
+            OP_NOT_ALLOWED_FOR_KIND,
+            ValidationReason::OpNotAllowedForKind,
+        ),
         (MISSING_TIME_WINDOW, ValidationReason::MissingTimeWindow),
         (INVALID_BASE_GTS_ID, ValidationReason::InvalidBaseGtsId),
         (

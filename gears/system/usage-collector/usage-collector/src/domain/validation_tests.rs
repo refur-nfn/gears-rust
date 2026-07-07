@@ -220,7 +220,7 @@ fn gauge_usage_type() -> UsageType {
 
 fn ordinary_counter_record(value: Decimal) -> UsageRecord {
     UsageRecord {
-        uuid: Uuid::new_v4(),
+        id: Uuid::new_v4(),
         gts_id: counter_id(),
         tenant_id: Uuid::from_u128(1),
         resource_ref: ResourceRef::new("rsc-1", "compute.vm").expect("valid resource ref"),

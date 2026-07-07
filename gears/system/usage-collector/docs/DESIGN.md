@@ -93,6 +93,7 @@ This table maps non-functional requirements from PRD to specific design/architec
 | `cpt-cf-usage-collector-adr-usage-compensation`                               | Usage compensation primitive: counter-only, append-only, strictly-negative `value` UsageRecord with `corrects_id` set (pointing at the ordinary usage row being offset) on the unified ingestion path; reduces `SUM` without mutating the original; no dedicated compensate endpoint / SDK method / SPI call.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `cpt-cf-usage-collector-adr-consistency-contract`                             | Floor-and-ceiling consistency contract: ingestion `Acknowledged` is durable and dedup-visible; the Query SPI (raw + aggregated + catalog) is eventually consistent with no upper bound at the gear floor; read-after-write flows MUST use the ingestion ack; each plugin's deployment guide MAY advertise a stronger ceiling. No typed `consistency_profile()` SPI method in v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `cpt-cf-usage-collector-adr-0012-unified-plugin-catalog-and-gts-id-reference` | The plugin-DB usage-type catalog (managed via SDK/REST) is the sole catalog; usage records reference usage types by `gts_id` (all derived from the reserved base `gts.cf.core.uc.usage_record.v1~`). Catalog rows are flat: counter vs gauge lives in a `kind: UsageKind` column, and `metadata_fields: Vec<String>` declares the allowed keys (all values typed as String); no per-usage-type JSON Schema validator. |
+| `cpt-cf-usage-collector-adr-deterministic-usage-record-id`                   | `UsageRecord.id` is gateway-derived, not caller-supplied: a deterministic UUIDv5 of the dedup key `(tenant_id, gts_id, idempotency_key)` under the fixed namespace `56313026-863b-4de8-b32b-1f96b67306ed` (`usage_collector_sdk::derive_usage_record_id`). The create request carries no identity field; a stray `id` is rejected `400`. Guarantees identity uniqueness by construction and eliminates false idempotency conflicts on exact retries. |
 
 ### 1.3 Architecture Layers
 
@@ -514,7 +515,7 @@ Full HTTP REST operation surface, served behind the platform API gateway. Authen
 
 #### Aggregate Asymmetry
 
-Per `cpt-cf-usage-collector-principle-aggregate-asymmetry` ([§2.1](#21-design-principles)), the collector exposes two read shapes that intentionally differ. `GET /usage-collector/v1/records` is an OData list endpoint (filter / order / cursor) that satisfies open-ended raw exploration with stable keyset pagination over `(created_at, uuid)`. `POST /usage-collector/v1/records/aggregate` is a body-shaped RPC that takes a typed aggregation request and returns a non-paginated result set. Toolkit's OData layer does not expose `$apply` (group-by / aggregate transforms), and the aggregate response is bounded by `group_by` cardinality rather than by row volume, so paginating it would add complexity without recovering safety.
+Per `cpt-cf-usage-collector-principle-aggregate-asymmetry` ([§2.1](#21-design-principles)), the collector exposes two read shapes that intentionally differ. `GET /usage-collector/v1/records` is an OData list endpoint (filter / order / cursor) that satisfies open-ended raw exploration with stable keyset pagination over `(created_at, id)`. `POST /usage-collector/v1/records/aggregate` is a body-shaped RPC that takes a typed aggregation request and returns a non-paginated result set. Toolkit's OData layer does not expose `$apply` (group-by / aggregate transforms), and the aggregate response is bounded by `group_by` cardinality rather than by row volume, so paginating it would add complexity without recovering safety.
 
 #### Endpoints Overview
 
@@ -537,7 +538,7 @@ All data paths are namespaced under `/usage-collector/v1/`. OperationIds follow 
 
 #### Cursor & Pagination
 
-Per `cpt-cf-usage-collector-principle-cursor-gateway-ownership` ([§2.1](#21-design-principles)), the Query Gateway uses ToolKit's canonical cursor envelope, `toolkit_odata::CursorV1`, as the opaque continuation token for raw-record reads. The cursor is **owned, issued, decoded, and validated at the gateway**; the Plugin SPI never sees the wire-level token — it receives a structured `(filter_ast, order_keys, page_after, limit)` tuple and returns `(rows, last_keyset)`. Pagination order is the canonical keyset `(created_at, uuid)`; the monotonic-tiebreaker invariant guarantees successive page boundaries do not skip or repeat rows within a stable filter scope. Plugins MUST NOT mint, encode, or interpret a wire cursor — that keeps cursor versioning, signing posture, and validation rules at a single platform-owned location (`toolkit_odata`).
+Per `cpt-cf-usage-collector-principle-cursor-gateway-ownership` ([§2.1](#21-design-principles)), the Query Gateway uses ToolKit's canonical cursor envelope, `toolkit_odata::CursorV1`, as the opaque continuation token for raw-record reads. The cursor is **owned, issued, decoded, and validated at the gateway**; the Plugin SPI never sees the wire-level token — it receives a structured `(filter_ast, order_keys, page_after, limit)` tuple and returns `(rows, last_keyset)`. Pagination is anchored on the canonical unique keyset `(created_at, id)`: the gateway appends that pair (direction-aware) as a tiebreaker suffix to whatever order the caller requests — defaulting to it outright when `$orderby` is omitted — so the effective order always ends in a globally-unique key. The monotonic-tiebreaker invariant then guarantees successive page boundaries do not skip or repeat rows within a stable filter scope, including under an explicit `$orderby` whose leading key is non-unique. Plugins MUST NOT mint, encode, or interpret a wire cursor — that keeps cursor versioning, signing posture, and validation rules at a single platform-owned location (`toolkit_odata`).
 
 #### Canonical Page Envelope
 
@@ -865,7 +866,7 @@ sequenceDiagram
     participant PH as plugin-host
     participant Hub as client-hub
     participant SP as storage-plugin
-    Caller ->> Surface: GET /usage-collector/v1/records?$filter=…&$orderby=created_at asc, uuid asc&$top=N&cursor=<opaque CursorV1> (with &SecurityContext)
+    Caller ->> Surface: GET /usage-collector/v1/records?$filter=…&$orderby=created_at asc, id asc&$top=N&cursor=<opaque CursorV1> (with &SecurityContext)
     Surface ->> QG: query_raw(&ctx, request) (OData parse: $filter → FilterNode<UsageRecordFilterField>, $orderby → ODataOrderBy, $top → limit, cursor → opaque CursorV1 blob)
     QG ->> PDP: authorize "query_raw_records" (attribution tuple)
     PDP -->> QG: PdpDecision + PdpConstraints
@@ -902,7 +903,7 @@ decodes the opaque `CursorV1`, validates it against the current `$filter` /
 `$orderby` (mismatches return canonical Problem envelopes), enforces the
 mandatory `(created_at ge X) and (created_at lt Y)` window after OData parsing,
 and re-encodes the plugin-returned `last_keyset` (over the canonical
-`(created_at, uuid)` `Keyset`) into the next `CursorV1`. The plugin sees only
+`(created_at, id)` `Keyset`) into the next `CursorV1`. The plugin sees only
 the structured tuple `(filter_ast, order, page_after, limit)` and returns
 `(rows, last_keyset)` — never an encoded cursor. An empty match within the
 authorized scope returns an empty `value`, not an error.
@@ -1054,6 +1055,8 @@ This section publishes the single plugin-agnostic consistency contract SDK, REST
 #### 3.11.1 Performance Patterns (PERF-DESIGN-001)
 
 The collector holds no gear-owned cache, no merge core, and no in-process result caching: the usage-type catalog SoR is the plugin-owned `usage_type_catalog` reached per call through the Plugin SPI, and query semantics are server-side aggregation pushdown — the core never fans out per-row reads. Gear instances are async (Rust); pooling against the active plugin is plugin-host-owned. Per-request memory is bounded by the metadata size limit (`cpt-cf-usage-collector-fr-record-metadata`, default 8 KiB) and by the batch and query caps in `usage-collector-v1.yaml`, enforced at the wire boundary.
+
+The aggregation path resolves the queried usage type (existence **and** `kind`) through a single `get_usage_type` catalog SPI read before dispatch. The per-kind aggregation-op guard (`require_op_allowed_for_kind`) reads `kind` from that same lookup, so it adds no round-trip beyond the catalog existence check already required on every aggregation query — consistent with the no-cache posture above, that read is deliberately not memoized (a `gts_id`→`kind` cache is avoided so the plugin remains the single catalog SoR). This is an accepted per-request cost within the aggregated-query p95 budget ([§3.11.2](#3112-latency-budgets-perf-design-003)); if aggregation QPS later dominates plugin load, folding `kind` into the aggregate SPI response (rather than a gateway cache) is the preferred lever.
 
 #### 3.11.2 Latency Budgets (PERF-DESIGN-003)
 

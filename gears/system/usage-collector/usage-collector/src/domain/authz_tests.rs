@@ -47,7 +47,7 @@ fn ctx() -> SecurityContext {
 
 fn record_with(subject: Option<SubjectRef>) -> UsageRecord {
     UsageRecord {
-        uuid: Uuid::from_u128(0x0001),
+        id: Uuid::from_u128(0x0001),
         gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
         tenant_id: Uuid::from_u128(0xC330),
         resource_ref: ResourceRef::new("rsc-eq", "compute.vm").expect("valid resource ref"),
@@ -148,14 +148,14 @@ async fn key_and_record_compose_byte_identical_pdp_requests_with_full_subject() 
 
 /// Two records that hash-equal under `AttributionTupleKey` MUST always
 /// produce equal PDP requests -- even when their *non*-tuple fields
-/// (`uuid`, `gts_id`, `value`, `idempotency_key`, `metadata`,
+/// (`id`, `gts_id`, `value`, `idempotency_key`, `metadata`,
 /// `corrects_id`, `created_at`) differ wildly. This pins the
 /// projection-correctness premise of the dedup directly: "share the
 /// tuple => share the PDP payload".
 #[tokio::test]
 async fn equal_tuple_keys_produce_equal_pdp_requests_even_when_non_tuple_fields_differ() {
     let record_a = UsageRecord {
-        uuid: Uuid::from_u128(0xAAAA),
+        id: Uuid::from_u128(0xAAAA),
         gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
         tenant_id: Uuid::from_u128(0xDEAD),
         resource_ref: ResourceRef::new("rsc-shared", "compute.vm").expect("valid resource ref"),
@@ -173,7 +173,7 @@ async fn equal_tuple_keys_produce_equal_pdp_requests_even_when_non_tuple_fields_
         resource_ref: record_a.resource_ref.clone(),
         subject_ref: record_a.subject_ref.clone(),
         // … wildly different non-tuple fields:
-        uuid: Uuid::from_u128(0xBBBB),
+        id: Uuid::from_u128(0xBBBB),
         gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
         metadata: BTreeMap::new(),
         value: Decimal::from(-999),

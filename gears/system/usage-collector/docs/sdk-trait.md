@@ -217,7 +217,7 @@ transport-agnostic):
 - Core ingestion: `UsageRecord` (§2.1), `ResourceRef` (§2.2), `SubjectRef` (§2.3),
   `UsageType` (§2.4), `IdempotencyKey` (§2.5), `RecordMetadata` (§2.6),
   `SecurityContext` (§2.7), `UsageRecordStatus` (§2.8).
-- Query: `RawQuery` (§3.2), `AggregationResult` (§3.3), plus the SDK-side `TimeWindow`, `AggregationOp`, `AggregationDimension`, `AggregationSpec`, and `AggregationBucket` (the aggregation surface). `AggregationBucket.key` is `Vec<String>`; per-dimension string-encoding rules live in §3.3 of `domain-model.md`.
+- Query: `RawQuery` (§3.2), `AggregationResult` (§3.3), plus the SDK-side `AggregationOp`, `AggregationDimension`, `AggregationSpec`, and `AggregationBucket` (the aggregation surface). `AggregationBucket.key` is `Vec<String>`; per-dimension string-encoding rules live in §3.3 of `domain-model.md`.
 - Filter / pagination: `UsageRecordQuery` (filterable-field schema, fed to `#[derive(ODataFilterable)]`), `UsageRecordFilterField` (macro-generated, §2.9), `MetadataFilter` (typed side channel for dynamic JSON-key filtering), `Keyset` (§2.10).
 
 Per `cpt-cf-usage-collector-adr-0012-unified-plugin-catalog-and-gts-id-reference`,
@@ -230,7 +230,7 @@ those predicates throughout the SDK surface.
 `RawQuery`, `AggregationResult`, `UsageRecordQuery` /
 `UsageRecordFilterField`, `MetadataFilter`, and `Keyset` are defined in
 [`domain-model.md`](./domain-model.md) §3 and §2.9–2.10. The SDK-side
-aggregation surface — `TimeWindow`, `AggregationOp`,
+aggregation surface — `AggregationOp`,
 `AggregationDimension`, `AggregationSpec`, and `AggregationBucket` — is
 declared in `models.rs`. `AggregationBucket.key` is `Vec<String>`: each
 entry is the string form of the corresponding `AggregationDimension`
@@ -239,7 +239,7 @@ dimensions verbatim from the record). Dimension *kind* is recoverable
 by position from the caller-supplied `group_by`. SDK-specific aspects:
 
 - `RawQuery` is realized as the tuple
-  `(UsageTypeGtsId, TimeWindow, &toolkit_odata::ODataQuery,
+  `(UsageTypeGtsId, &toolkit_odata::ODataQuery,
   &[MetadataFilter])` threaded into `list_usage_records`:
   - `gts_id` is **type-enforced** per ADR 0012 — it travels as
     the typed `UsageTypeGtsId` parameter on the SDK signature, not as an
@@ -266,8 +266,8 @@ by position from the caller-supplied `group_by`. SDK-specific aspects:
     purpose; the SDK signature accepts a `&[MetadataFilter]` instead. Slice
     semantics: AND across distinct keys, OR within `MetadataFilter::values`,
     empty slice = no metadata filter applied.
-  - `order` is the canonical `created_at asc, uuid asc`, and `page_after` is
-    the typed `(created_at, uuid)` `Keyset` captured by the gateway from the
+  - `order` is the canonical `created_at asc, id asc`, and `page_after` is
+    the typed `(created_at, id)` `Keyset` captured by the gateway from the
     caller-supplied opaque `CursorV1`.
 - Admissibility is declaration-driven (not a static Rust enum): the SDK
   rejects metadata-key filters whose `key()` is not in the referenced usage
@@ -423,11 +423,11 @@ The trait carries nine methods, one per SDK-exposed capability (ADR 0012 removed
 
 | Method (logical)             | Realizes                                                                                                        | Inputs (beyond `&SecurityContext`)                                                                                                                                                                                                                                                                                                                                                             | Output (Ok variant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Create single usage record   | `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `seq-emit-usage`                                     | One `UsageRecord` value (per-record fields described in §"Method Contracts", including the optional `corrects_id` discriminator and a signed `value`).                                                                                                                                                                                                                                         | The persisted `UsageRecord` (newly written on a fresh insert; the previously stored row on an exact-equality idempotency retry — silent absorb). Same-key canonical-field mismatch surfaces as `Conflict` (`ConflictReason::IdempotencyConflict`).                                                                                                                                                                                                                                                                            |
-| Create batched usage records | `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `nfr-throughput`, `nfr-batch-and-report-timing`      | Non-empty list of `UsageRecord` (each carrying an optional `corrects_id`).                                                                                                                                                                                                                                                                                                                     | List of per-record `Result` aligned with the input order; each `Ok` arm carries the persisted `UsageRecord`.                                                                                                                                                                                                                                                                                                                                                                                                       |
-| Aggregated query             | `fr-query-aggregation`, `seq-query-aggregated`                                                                  | `gts_id: UsageTypeGtsId` (typed usage-type key — required; the gateway rejects any `gts_id`-touching predicate in `query` as a typed validation error), `TimeWindow` (`[from, to)` UTC), `&ODataQuery` (filter only — pagination/order ignored), `&[MetadataFilter]` (typed JSON-key side channel), and `AggregationSpec` (`op` ∈ SUM / COUNT / MIN / MAX / AVG, plus ordered `group_by`).                                                                                                                          | `AggregationResult` — `Vec<AggregationBucket>`. Each bucket carries a `key: Vec<String>` (in `group_by` order; empty when `group_by` was empty) and `value: Option<Decimal>`. Dimension values are emitted as their canonical string form (TenantId → `Uuid::to_string()`, lowercase hyphenated; all others verbatim from the record).                                                                                                                                                                                                                                                                                                                                  |
-| Raw keyset-paginated query   | `fr-query-raw`, `seq-query-raw`                                                                                 | `gts_id: UsageTypeGtsId` (typed usage-type key — required; the gateway rejects any `gts_id`-touching predicate in `query` as a typed validation error), `TimeWindow` (`[from, to)` UTC; replaces any `created_at` filter clause), `&ODataQuery` (parsed `$filter` over `UsageRecordFilterField`, `order`, optional `page_after`, `limit`), and `&[MetadataFilter]` (typed side channel for dynamic JSON-key filtering; AND across entries, OR within `values`).                                                                                                                                                                | `toolkit_odata::Page<UsageRecord>` (`items` + `page_info` with opaque `CursorV1`).                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Deactivate usage event       | `fr-event-deactivation`, `seq-deactivate-event`                                                                 | The target `UsageRecord.uuid` (either an ordinary usage row or a compensation row).                                                                                                                                                                                                                                                                                                              | `()`. The targeted row and every currently-active compensation row whose `corrects_id` equals the targeted id are flipped to `inactive` atomically in one plugin backend transaction; the SDK / REST surface returns no body (HTTP 204 No Content). Rejections for already-inactive or unknown records are surfaced as error variants.                                                                                                                                                                            |
+| Create single usage record   | `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `seq-emit-usage`                                     | One `CreateUsageRecord` value — the identity-free create shape (per-record fields described in §"Method Contracts", including the optional `corrects_id` discriminator and a signed `value`; no `id` field).                                                                                                                                                                                                                                         | The persisted `UsageRecord` (newly written on a fresh insert; the previously stored row on an exact-equality idempotency retry — silent absorb). Same-key canonical-field mismatch surfaces as `Conflict` (`ConflictReason::IdempotencyConflict`).                                                                                                                                                                                                                                                                            |
+| Create batched usage records | `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `nfr-throughput`, `nfr-batch-and-report-timing`      | Non-empty list of `CreateUsageRecord` — the identity-free create shape (each carrying an optional `corrects_id`).                                                                                                                                                                                                                                                                                                                     | List of per-record `Result` aligned with the input order; each `Ok` arm carries the persisted `UsageRecord`.                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Aggregated query             | `fr-query-aggregation`, `seq-query-aggregated`                                                                  | `gts_id: UsageTypeGtsId` (typed usage-type key — required; the gateway rejects any `gts_id`-touching predicate in `query` as a typed validation error), `&ODataQuery` (filter only — pagination/order ignored — carrying the mandatory bounded `created_at` `[from, to)` window as `created_at ge … and created_at lt …` conjuncts), `&[MetadataFilter]` (typed JSON-key side channel), and `AggregationSpec` (`op` ∈ SUM / COUNT / MIN / MAX / AVG, plus ordered `group_by`).                                                                                                                          | `AggregationResult` — `Vec<AggregationBucket>`. Each bucket carries a `key: Vec<String>` (in `group_by` order; empty when `group_by` was empty) and `value: Option<BigDecimal>` (arbitrary precision; wire-encoded as a JSON string). Dimension values are emitted as their canonical string form (TenantId → `Uuid::to_string()`, lowercase hyphenated; all others verbatim from the record).                                                                                                                                                                                                                                                                                                                                  |
+| Raw keyset-paginated query   | `fr-query-raw`, `seq-query-raw`                                                                                 | `gts_id: UsageTypeGtsId` (typed usage-type key — required; the gateway rejects any `gts_id`-touching predicate in `query` as a typed validation error), `&ODataQuery` (parsed `$filter` over `UsageRecordFilterField` — carrying the mandatory bounded `created_at` `[from, to)` window as `created_at ge … and created_at lt …` conjuncts — plus `order`, optional `page_after`, `limit`), and `&[MetadataFilter]` (typed side channel for dynamic JSON-key filtering; AND across entries, OR within `values`).                                                                                                                                                                | `toolkit_odata::Page<UsageRecord>` (`items` + `page_info` with opaque `CursorV1`).                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Deactivate usage event       | `fr-event-deactivation`, `seq-deactivate-event`                                                                 | The target `UsageRecord.id` (either an ordinary usage row or a compensation row).                                                                                                                                                                                                                                                                                                              | `()`. The targeted row and every currently-active compensation row whose `corrects_id` equals the targeted id are flipped to `inactive` atomically in one plugin backend transaction; the SDK / REST surface returns no body (HTTP 204 No Content). Rejections for already-inactive or unknown records are surfaced as error variants.                                                                                                                                                                            |
 | Create usage type          | `fr-usage-type-registration`, `seq-register-usage-type`, `adr-0012-unified-plugin-catalog-and-gts-id-reference` | One `UsageType` (`gts_id: UsageTypeGtsId`, `kind: UsageKind`, `metadata_fields: Vec<String>`). The `gts_id` base-derivation check runs at the `UsageTypeGtsId::new` boundary (`UsageTypeGtsId::new` / `Deserialize`) upstream of this trait call; the `kind` field is validated as a closed `UsageKind` enum at the `UsageKind::from_str` REST handler-boundary parse (the typed `UsageKind` argument on the SDK trait carries the same guarantee); the trait implementation then performs PDP authorization and `metadata_fields` well-formedness (unique non-empty strings) before plugin SPI dispatch. | `UsageType` — the durable catalog row produced by the plugin's `create_usage_type` SPI call against the plugin-owned `usage_type_catalog`, carrying the registered `gts_id`, `kind`, and `metadata_fields` per ADR 0012. A `gts_id` that does not derive from the reserved abstract base `gts.cf.core.uc.usage_record.v1~` is rejected at the `UsageTypeGtsId::new` boundary as `UsageCollectorError::InvalidArgument` carrying `ValidationReason::InvalidBaseGtsId` (REST `400` `Problem` with `field_violations[0].field="gts_id"` and `.reason="INVALID_BASE_GTS_ID"`); unknown `kind` values are rejected at the `UsageKind::from_str` boundary as `UsageCollectorError::InvalidArgument` carrying `ValidationReason::Validation` (REST `400` `Problem` with `field_violations[0].field="kind"` and `.reason="VALIDATION"`). Duplicate `gts_id` surfaces `AlreadyExists`. |
 | Get usage type              | `fr-usage-type-existence-and-semantics`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`                 | `gts_id: GtsId`.                                                                                                                                                                                                                                                                                                                                                                               | `UsageType` carrying `gts_id`, `kind`, and `metadata_fields` (counter / gauge classification is carried by the closed `UsageKind` enum on the row, read via `UsageType::is_counter()` / `UsageType::is_gauge()`). Missing identifier surfaces `UsageTypeNotFound`.                                                                                                                                                                                                                                                                                                                      |
 | List usage types             | `fr-usage-type-existence-and-semantics`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`                 | One `&ODataQuery` (`toolkit_odata`) carrying the optional `limit` and `cursor` — the foundation surface declares no filterable usage-type fields and any filter expression is ignored.                                                                                                                                                                                                          | `toolkit_odata::Page<UsageType>` — keyset-paginated list of registered usage types, each row including `gts_id`, `kind`, and `metadata_fields` (counter / gauge classification is carried by `UsageType.kind` per ADR 0012).                                                                                                                                                                                                                                                                                                                               |
@@ -435,10 +435,19 @@ The trait carries nine methods, one per SDK-exposed capability (ADR 0012 removed
 
 All methods return a `Result` over the listed Ok variant and
 `UsageCollectorError` (see §"Error Taxonomy"). The ingestion input
-type is `UsageRecord` itself (declared in `models.rs`): the create
-surfaces accept the same `UsageRecord` they return. The caller
-supplies every field including `uuid` and `created_at`; the persisted
-row is byte-identical on a successful insert and on an exact-equality
+type is `CreateUsageRecord` (declared in `models.rs`) — an
+identity-free create shape that mirrors `UsageRecord` minus the two
+fields a caller cannot own on create: the server-derived `id` and the
+initial `status`. The caller supplies every remaining field, including
+`created_at`. Identity is not caller-supplied and cannot be: `id` is a
+deterministic UUIDv5 of the dedup key
+`(tenant_id, gts_id, idempotency_key)`, stamped — together with the
+initial `status = active` — by `CreateUsageRecord::into_usage_record`
+at the single domain-service choke point every caller (REST and
+in-process SDK) funnels through (see
+`cpt-cf-usage-collector-adr-deterministic-usage-record-id`). The
+persisted row is byte-identical to the input, plus the derived `id`
+and `status`, on a successful insert and on an exact-equality
 idempotency replay, so consumers MAY treat the returned value as a
 confirmation rather than as a transform of the input.
 
@@ -522,7 +531,7 @@ There is NO dedicated `compensate` operation on the
 `UsageCollectorClientV1` SDK trait. Compensation rides the unified emit
 path — Method 1 `create_usage_record` and Method 2 `create_usage_records`
 — by submitting a record with `corrects_id` set to the referenced
-ordinary usage row's `UsageRecord.uuid` and a strictly-negative
+ordinary usage row's `UsageRecord.id` and a strictly-negative
 `value` (counters only — a `corrects_id IS NOT NULL` record on a gauge
 usage type is rejected by the four-cell value matrix). Rationale:
 consistent PDP attribution on every
@@ -559,9 +568,14 @@ Plugin SPI (no dedicated `compensate` SPI call).
   method on `UsageCollectorClientV1`; an explicit note appears at the
   start of §"Method Contracts" explaining the rationale (consistent PDP
   attribution + mandatory idempotency-key handling on every ingestion).
-- Structural inputs (carried on a `UsageRecord`,
-  named parameters, order-insensitive):
-  - `uuid` — caller-supplied `Uuid`; required.
+- Structural inputs (carried on a `CreateUsageRecord` — the
+  identity-free create shape, mirroring `UsageRecord` minus the
+  server-owned `id` and `status`; named parameters, order-insensitive).
+  The create input has NO `id` field: identity is not caller-supplied —
+  the returned `UsageRecord.id` is the deterministic UUIDv5 of the dedup
+  key `(tenant_id, gts_id, idempotency_key)` (see
+  `usage_collector_sdk::derive_usage_record_id`), stamped by
+  `CreateUsageRecord::into_usage_record` and authoritative on return:
   - `tenant_id` — `Uuid`; required.
   - `resource_ref` — `ResourceRef`; required.
   - `subject_ref` — `SubjectRef`; optional.
@@ -580,7 +594,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
     MUST NOT pre-clamp, pre-reject, or sign-flip `value`).
   - `created_at` — UTC `Timestamp`; required.
   - `idempotency_key` — `IdempotencyKey`; required.
-  - `corrects_id` — opaque `UsageRecord.uuid`; optional. Presence
+  - `corrects_id` — opaque `UsageRecord.id`; optional. Presence
     (`corrects_id` set / IS NOT NULL) marks the submission as a
     counter-compensation row targeting the referenced ordinary usage
     row; absence (`corrects_id` IS NULL) marks the submission as an
@@ -705,7 +719,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
   `cpt-cf-usage-collector-seq-emit-usage`.
 - SecurityContext: same as Method 1; PDP authorization is performed
   per record against the full attribution tuple.
-- Structural inputs: a non-empty list of `UsageRecord`
+- Structural inputs: a non-empty list of `CreateUsageRecord`
   values. Each record carries the same fields as in Method 1,
   including the optional `corrects_id` discriminator (absence marks the
   submission as an ordinary usage row, presence marks it as a
@@ -746,7 +760,6 @@ Plugin SPI (no dedicated `compensate` SPI call).
       &self,
       ctx: &SecurityContext,
       gts_id: UsageTypeGtsId,
-      window: TimeWindow,
       query: &ODataQuery,
       metadata_filter: &[MetadataFilter],
       aggregation: AggregationSpec,
@@ -755,8 +768,9 @@ Plugin SPI (no dedicated `compensate` SPI call).
 
   Filter/metadata shape and PDP composition are identical to
   [`Method 4 — Raw keyset-paginated query`](#method-4--raw-keyset-paginated-query);
-  the only Method-3 specifics are the time window (carried by the
-  validated [`TimeWindow`]) and the [`AggregationSpec`].
+  the only Method-3 specific is the [`AggregationSpec`]. As on Method 4,
+  the mandatory bounded `created_at` `[from, to)` window is carried
+  inside `query`.
 
 - Structural inputs:
   - `gts_id: UsageTypeGtsId` — the typed usage-type key (required). The
@@ -765,13 +779,14 @@ Plugin SPI (no dedicated `compensate` SPI call).
     reserved on this method, and the gateway rejects any
     `gts_id`-touching predicate in `query` as a typed validation error so the typed
     parameter is the single source of truth.
-  - `window: TimeWindow` — validated `[from, to)` UTC range; `from < to`
-    is enforced at construction (and at the deserialize boundary).
   - `query: &ODataQuery` — same filter surface as `list_usage_records`,
     over [`UsageRecordFilterField`] minus the reserved `gts_id` field.
-    Pagination/order fields on the query are ignored on this method
-    (the result is not paginated). User-supplied filters can only
-    narrow the PDP-authorized scope.
+    Carries the mandatory bounded `created_at` `[from, to)` window as
+    `created_at ge … and created_at lt …` conjuncts (the gateway
+    requires at least one lower and one upper bound, else
+    `MissingTimeWindow`). Pagination/order fields on the query are
+    ignored on this method (the result is not paginated). User-supplied
+    filters can only narrow the PDP-authorized scope.
   - `metadata_filter: &[MetadataFilter]` — typed side channel for
     dynamic JSON-key filters (same shape and semantics as
     `list_usage_records`).
@@ -784,8 +799,10 @@ Plugin SPI (no dedicated `compensate` SPI call).
   1. Missing/invalid `SecurityContext` is rejected upstream by the
      ToolKit gateway (the SDK surfaces no `Authentication` error
      variant); PDP denial yields `PermissionDenied`.
-  2. `TimeWindow::new` rejects `from >= to` as `InvalidArgument`
-     (`ValidationReason::Validation`) at the SDK boundary; the gateway
+  2. The gateway rejects a `query` whose `$filter` does not pin a bounded
+     `created_at` window (at least one lower `ge`/`gt` and one upper
+     `le`/`lt` bound) as `InvalidArgument`
+     (`ValidationReason::MissingTimeWindow`, `MISSING_TIME_WINDOW`); it
      also surfaces `InvalidArgument` when `query`
      touches the reserved `gts_id` field (the typed `gts_id` parameter
      is the only admissible carrier), when a `Metadata(key)` dimension
@@ -793,12 +810,18 @@ Plugin SPI (no dedicated `compensate` SPI call).
      `metadata_fields`, or when a filter references an undeclared
      field.
   3. An unregistered `gts_id` parameter yields `NotFound` and is
-     rejected before plugin dispatch.
+     rejected before plugin dispatch. The gateway resolves the queried
+     usage type's `kind` before dispatch and rejects an op the kind
+     does not admit (counter admits `{SUM, COUNT}`; gauge admits
+     `{MIN, MAX, AVG, COUNT}`) with `UsageCollectorError::InvalidArgument`
+     carrying `ValidationReason::OpNotAllowedForKind` (REST `400`,
+     `field_violations[0].reason="OP_NOT_ALLOWED_FOR_KIND"`); an
+     unregistered `gts_id` surfaces as `NotFound`.
   4. Plugin-side failures map to `ServiceUnavailable` or `Internal` as
      in Method 1.
 - Success output: `AggregationResult` (a `Vec<AggregationBucket>`; each
   bucket carries a `key: Vec<String>` of `group_by` values in caller
-  order and a `value: Option<Decimal>`). Each `key` entry is the
+  order and an arbitrary-precision `value: Option<BigDecimal>`). Each `key` entry is the
   canonical string form of the corresponding `AggregationDimension`
   (TenantId → `Uuid::to_string()`, lowercase hyphenated; all other
   dimensions verbatim). An empty `group_by` produces a single bucket
@@ -834,7 +857,6 @@ Plugin SPI (no dedicated `compensate` SPI call).
       &self,
       ctx: &SecurityContext,
       gts_id: UsageTypeGtsId,
-      window: TimeWindow,
       query: &ODataQuery,
       metadata_filter: &[MetadataFilter],
   ) -> Result<toolkit_odata::Page<UsageRecord>, UsageCollectorError>;
@@ -848,12 +870,14 @@ Plugin SPI (no dedicated `compensate` SPI call).
   `query` is rejected as a typed validation error so the typed parameter remains
   the single source of truth.
 
-  `window: TimeWindow` carries the half-open `[from, to)` time range
-  (validated at construction; `from < to` is structural). The
-  `ODataQuery` filter MUST NOT carry `created_at` predicates — the
-  time axis is sourced exclusively from `window`, which is single-
-  sourced to avoid a duplicate filter / silent-ignored predicate
-  footgun.
+  The half-open `[from, to)` time window is carried inside the
+  `ODataQuery` filter as `created_at ge … and created_at lt …`
+  predicates — `created_at` is a first-class `UsageRecordFilterField`.
+  The gateway requires the filter to pin a bounded window (at least one
+  lower `ge`/`gt` and one upper `le`/`lt` `created_at` bound); an
+  unbounded window is rejected as `InvalidArgument`
+  (`ValidationReason::MissingTimeWindow`, `MISSING_TIME_WINDOW`) before
+  plugin dispatch.
 
   `ODataQuery` is the framework-canonical, non-generic query carrier from
   `toolkit-odata`. The static filter surface is bound to
@@ -874,7 +898,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
   - `query: &ODataQuery` carrying the parsed `filter_ast` over
     `UsageRecordFilterField` minus the reserved `gts_id` field
     (already PDP-constrained on entry to the plugin dispatch step), the
-    canonical `created_at asc, uuid asc` `order`, an optional `page_after`
+    canonical `created_at asc, id asc` `order`, an optional `page_after`
     keyset (gateway-decoded from the caller-supplied `CursorV1`), and a
     bounded `limit`.
   - `metadata_filter: &[MetadataFilter]` carrying, for each filtered
@@ -898,7 +922,11 @@ Plugin SPI (no dedicated `compensate` SPI call).
      keys resolved from the typed `gts_id` parameter's
      `metadata_fields`), an operator outside the per-field allowance
      (dimension filters accept `eq` / `in` only over `String`-typed
-     values), or an `order` other than the canonical raw-query order.
+     values). The `order` is **not** a rejection case: the gateway
+     normalizes any caller `$orderby` to end in the canonical unique
+     `(created_at, id)` keyset suffix (appended in the caller's sort
+     direction) before dispatch, so the plugin always receives a
+     gap-free, uniform-direction keyset.
   4. An unregistered `gts_id` parameter yields `NotFound` and is
      rejected before plugin dispatch (D11 — UsageType-existence
      validation inside the trait implementation).
@@ -929,7 +957,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
   argument) to the per-component `access_scope_with` helper invoked by
   `cpt-cf-usage-collector-component-deactivation-handler` for
   operator authorization.
-- Structural inputs: the target `UsageRecord.uuid`. Deactivation applies
+- Structural inputs: the target `UsageRecord.id`. Deactivation applies
   to a row of either kind — ordinary usage (`corrects_id IS NULL`) or
   counter compensation (`corrects_id IS NOT NULL`); the request
   parameters are unchanged by the compensation primitive.
@@ -947,10 +975,10 @@ Plugin SPI (no dedicated `compensate` SPI call).
     (`ConflictReason::AlreadyInactive`); no state change occurs and no
     other field is mutated. This realizes the monotonicity invariant on
     the SDK boundary.
-  - An unknown `UsageRecord.uuid` yields `NotFound`.
+  - An unknown `UsageRecord.id` yields `NotFound`.
 - Success output: `()`. The SDK trait returns `Ok(())` and the REST
   surface returns HTTP 204 No Content. On a successful return:
-  - The targeted `UsageRecord.uuid` (the explicitly-deactivated row,
+  - The targeted `UsageRecord.id` (the explicitly-deactivated row,
     regardless of whether its `corrects_id` is set) was `Active`
     before the call and is now `Inactive`.
   - Every currently-active compensation row whose `corrects_id`
@@ -1182,10 +1210,10 @@ Plugin SPI (no dedicated `compensate` SPI call).
   async fn get_usage_record(
       &self,
       ctx: &SecurityContext,
-      uuid: Uuid) -> Result<UsageRecord, UsageCollectorError>;
+      id: Uuid) -> Result<UsageRecord, UsageCollectorError>;
   ```
 
-- Structural inputs: the target `UsageRecord.uuid`. No filtering by
+- Structural inputs: the target `UsageRecord.id`. No filtering by
   `status` — both `active` and `inactive` rows are returned verbatim
   so the deactivation flow can reject already-inactive targets with
   the typed `AlreadyInactive` error variant.
@@ -1195,7 +1223,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
      by the trait implementation with no plugin SPI dispatch.
   2. PDP authorize over the resolved record. The trait fetches the
      row before PDP enforcement so PDP can authorize over the full
-     attribution tuple; the alternative (PDP over `uuid` alone) would
+     attribution tuple; the alternative (PDP over `id` alone) would
      break the resource-attribute reasoning model used by the rest of
      the gear. To keep this fetch-before-PDP ordering from turning the
      by-id surface into an existence oracle, a PDP denial is collapsed
@@ -1210,7 +1238,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
   Method 1 / Method 2, modulo any subsequent monotonic `status`
   transition through Method 5).
 - Declared SDK error categories for this method: PDP denial collapsed
-  to `NotFound` (see validation step 2); an unknown `uuid` as
+  to `NotFound` (see validation step 2); an unknown `id` as
   `NotFound`; transient and structural plugin unavailability as
   `ServiceUnavailable`; uncategorized plugin failures as `Internal`.
 - Idempotency: pure read; safe to retry.
@@ -1259,7 +1287,7 @@ failure — consumers match the category, then the reason.
   - `Validation` (`VALIDATION`) — generic request-shape failure: batch
     size out of bounds, the validating-newtype rejects (`MetadataKey` /
     `MetadataFilter` / `ResourceRef` / `SubjectRef` / `IdempotencyKey` /
-    `TimeWindow` / record-id UUID), and the unknown-`kind` closed-enum
+    record-id UUID), and the unknown-`kind` closed-enum
     parse.
   - `SemanticsViolation` (`SEMANTICS_VIOLATION`) — counter value-matrix
     violation (ordinary `value >= 0`, compensation `value < 0`).
@@ -1286,7 +1314,7 @@ failure — consumers match the category, then the reason.
 - `NotFound { resource_type, name, detail }` — referenced resource not
   present (HTTP 404). Covers a missing usage type (`get_usage_type` /
   `list_usage_types` / `delete_usage_type`, and ingestion / query
-  references to an unregistered `gts_id`), a missing `UsageRecord.uuid`
+  references to an unregistered `gts_id`), a missing `UsageRecord.id`
   on deactivation / point-read (and, on those by-id surfaces, a PDP
   denial collapsed to `NotFound` per `collapse_deny_to_not_found`), and
   a compensation `corrects_id` that references no existing row (the
@@ -1666,14 +1694,14 @@ default this reference adopts.
   return shape.
 - OQ-4 (gaps G-7 and G-11): Whether the SDK trait enforces numeric
   caps for raw `page_size`, aggregation result row count, group-by
-  dimension count, and time-range window length at the trait
-  boundary, and the inclusivity semantics of `time_range`. This
-  reference defers numeric caps to the PRD NFR and the REST/OpenAPI
+  dimension count, and `created_at` window length at the trait
+  boundary, and the inclusivity semantics of the `created_at` window.
+  This reference defers numeric caps to the PRD NFR and the REST/OpenAPI
   contract; the SDK trait validates structural shape only (positive
-  `page_size`, bounded `time_range`). The SDK rustdoc documents the
-  conservative inclusive-start, exclusive-end convention for
-  `time_range`, aligned with the REST wire semantics, without making
-  it a breaking change surface.
+  `page_size`, a bounded `created_at` window). The gateway applies the
+  conservative inclusive-start, exclusive-end (`created_at ge … and
+  created_at lt …`) convention, aligned with the REST wire semantics,
+  without making it a breaking change surface.
 - OQ-5 (gap G-8): Whether `correlation_id` on `SecurityContext` is
   caller-supplied or runtime-provided on SDK calls. This reference
   treats `correlation_id` as a field of the resolved `SecurityContext`

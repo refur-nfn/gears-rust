@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 time = { workspace = true }
 rust_decimal = { workspace = true, features = ["serde-with-str"] }
+bigdecimal = { workspace = true }
 
 # GTS types
 gts = { workspace = true }

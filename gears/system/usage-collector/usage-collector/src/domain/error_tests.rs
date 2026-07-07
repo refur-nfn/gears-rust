@@ -243,18 +243,18 @@ fn domain_unknown_metadata_key_lifts_to_invalid_argument() {
 }
 
 #[test]
-fn idempotency_conflict_lifts_to_conflict_keyed_by_existing_uuid() {
-    let existing_uuid = uuid::Uuid::from_u128(0x1234_5678);
+fn idempotency_conflict_lifts_to_conflict_keyed_by_existing_id() {
+    let existing_id = uuid::Uuid::from_u128(0x1234_5678);
     let key = "idem-1".to_owned();
     let domain: DomainError = UsageCollectorPluginError::IdempotencyConflict {
         idempotency_key: key.clone(),
-        existing_uuid,
+        existing_id,
     }
     .into();
     assert!(matches!(
         &domain,
-        DomainError::IdempotencyConflict { idempotency_key: ik, existing_uuid: u }
-            if ik == &key && *u == existing_uuid
+        DomainError::IdempotencyConflict { idempotency_key: ik, existing_id: u }
+            if ik == &key && *u == existing_id
     ));
     let sdk: UsageCollectorError = domain.into();
     match sdk {
@@ -265,7 +265,7 @@ fn idempotency_conflict_lifts_to_conflict_keyed_by_existing_uuid() {
             ..
         } => {
             assert_eq!(resource_type, USAGE_RECORD_RESOURCE);
-            assert_eq!(name, existing_uuid.to_string());
+            assert_eq!(name, existing_id.to_string());
             assert_eq!(reason, ConflictReason::IdempotencyConflict);
         }
         other => panic!("expected Conflict, got {other:?}"),

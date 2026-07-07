@@ -139,10 +139,7 @@ impl UsageCollectorPluginV1 for MockPlugin {
         ))
     }
 
-    async fn get_usage_record(
-        &self,
-        _uuid: Uuid,
-    ) -> Result<UsageRecord, UsageCollectorPluginError> {
+    async fn get_usage_record(&self, _id: Uuid) -> Result<UsageRecord, UsageCollectorPluginError> {
         Err(UsageCollectorPluginError::internal(
             "test_fake: MockPlugin::get_usage_record not implemented",
         ))
@@ -868,6 +865,7 @@ pub struct HappyPathPlugin {
     query_aggregated_usage_records_response: Mutex<Option<AggregationResult>>,
     delete_usage_type_response: Mutex<Option<()>>,
 
+    create_record_input: Mutex<Option<UsageRecord>>,
     create_records_input: Mutex<Option<Vec<UsageRecord>>>,
     deactivate_input: Mutex<Option<Uuid>>,
     delete_usage_type_input: Mutex<Option<UsageTypeGtsId>>,
@@ -880,11 +878,11 @@ pub struct HappyPathPlugin {
     /// `len()` is the call count; the vec is forensic — tests can
     /// verify exactly which `gts_id`s the host looked up.
     get_usage_type_inputs: Mutex<Vec<UsageTypeGtsId>>,
-    /// Every record `uuid` ever passed to `get_usage_record`, in call
+    /// Every record `id` ever passed to `get_usage_record`, in call
     /// order. Drives the L1-corrects-id dedup tests the same way
     /// `get_usage_type_inputs` drives the catalog-dedup tests.
     get_usage_record_inputs: Mutex<Vec<Uuid>>,
-    /// Record `uuid`s that should surface as
+    /// Record `id`s that should surface as
     /// `UsageCollectorPluginError::UsageRecordNotFound` instead of
     /// returning the default `get_record_response`.
     get_usage_record_not_found: Mutex<std::collections::BTreeSet<Uuid>>,
@@ -907,6 +905,7 @@ impl HappyPathPlugin {
             list_usage_records_response: Mutex::new(None),
             query_aggregated_usage_records_response: Mutex::new(None),
             delete_usage_type_response: Mutex::new(None),
+            create_record_input: Mutex::new(None),
             create_records_input: Mutex::new(None),
             deactivate_input: Mutex::new(None),
             delete_usage_type_input: Mutex::new(None),
@@ -962,16 +961,16 @@ impl HappyPathPlugin {
     pub fn get_usage_type_calls(&self) -> usize {
         self.get_usage_type_inputs.lock().expect("mutex").len()
     }
-    /// Mark `uuid` so the next (and every subsequent) `get_usage_record`
+    /// Mark `id` so the next (and every subsequent) `get_usage_record`
     /// call carrying it returns `UsageRecordNotFound` regardless of the
     /// default `get_record_response`.
-    pub fn set_get_usage_record_not_found(&self, uuid: Uuid) {
+    pub fn set_get_usage_record_not_found(&self, id: Uuid) {
         self.get_usage_record_not_found
             .lock()
             .expect("mutex")
-            .insert(uuid);
+            .insert(id);
     }
-    /// Every record `uuid` passed to `get_usage_record`, in call order.
+    /// Every record `id` passed to `get_usage_record`, in call order.
     #[must_use]
     pub fn get_usage_record_inputs(&self) -> Vec<Uuid> {
         self.get_usage_record_inputs.lock().expect("mutex").clone()
@@ -1011,6 +1010,9 @@ impl HappyPathPlugin {
         *self.delete_usage_type_response.lock().expect("mutex") = Some(());
     }
 
+    pub fn last_create_record_input(&self) -> Option<UsageRecord> {
+        self.create_record_input.lock().expect("mutex").clone()
+    }
     pub fn last_create_records_input(&self) -> Option<Vec<UsageRecord>> {
         self.create_records_input.lock().expect("mutex").clone()
     }
@@ -1048,8 +1050,9 @@ fn not_programmed(method: &'static str) -> UsageCollectorPluginError {
 impl UsageCollectorPluginV1 for HappyPathPlugin {
     async fn create_usage_record(
         &self,
-        _record: UsageRecord,
+        record: UsageRecord,
     ) -> Result<UsageRecord, UsageCollectorPluginError> {
+        *self.create_record_input.lock().expect("mutex") = Some(record);
         // `take()` (not `clone()`) — `UsageCollectorPluginError` is
         // intentionally `!Clone` so tests program one outcome per call.
         match self.create_record_response.lock().expect("mutex").take() {
@@ -1181,18 +1184,15 @@ impl UsageCollectorPluginV1 for HappyPathPlugin {
             .ok_or_else(|| not_programmed("delete_usage_type"))
     }
 
-    async fn get_usage_record(&self, uuid: Uuid) -> Result<UsageRecord, UsageCollectorPluginError> {
-        self.get_usage_record_inputs
-            .lock()
-            .expect("mutex")
-            .push(uuid);
+    async fn get_usage_record(&self, id: Uuid) -> Result<UsageRecord, UsageCollectorPluginError> {
+        self.get_usage_record_inputs.lock().expect("mutex").push(id);
         if self
             .get_usage_record_not_found
             .lock()
             .expect("mutex")
-            .contains(&uuid)
+            .contains(&id)
         {
-            return Err(UsageCollectorPluginError::UsageRecordNotFound { id: uuid });
+            return Err(UsageCollectorPluginError::UsageRecordNotFound { id });
         }
         self.get_record_response
             .lock()

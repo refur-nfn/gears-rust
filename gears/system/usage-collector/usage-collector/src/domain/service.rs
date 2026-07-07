@@ -27,9 +27,10 @@ use toolkit_security::SecurityContext;
 use tracing::info;
 use types_registry_sdk::{InstanceQuery, TypesRegistryClient, TypesRegistryError};
 use usage_collector_sdk::{
-    AggregationResult, AggregationSpec, ConflictReason, MetadataFilter, USAGE_TYPE_RESOURCE,
-    UsageCollectorError, UsageCollectorPluginError, UsageCollectorPluginSpecV1,
-    UsageCollectorPluginV1, UsageRecord, UsageType, UsageTypeGtsId, ValidationReason,
+    AggregationResult, AggregationSpec, ConflictReason, CreateUsageRecord, MetadataFilter,
+    USAGE_TYPE_RESOURCE, UsageCollectorError, UsageCollectorPluginError,
+    UsageCollectorPluginSpecV1, UsageCollectorPluginV1, UsageRecord, UsageType, UsageTypeGtsId,
+    ValidationReason,
 };
 use uuid::Uuid;
 
@@ -40,7 +41,9 @@ use crate::domain::ports::metrics::{
     RecordKind, RecordOutcome, RequestOutcome, UsageCollectorMetrics, UsageTypeErrorCategory,
     UsageTypeOp,
 };
-use crate::domain::query::{compose_query_with_scope, require_bounded_time_window};
+use crate::domain::query::{
+    compose_query_with_scope, require_bounded_time_window, require_op_allowed_for_kind,
+};
 use crate::domain::validation::{
     SemanticsOutcome, validate_record_semantics, validate_submit_record_metadata,
     verify_l1_corrects_id,
@@ -226,7 +229,7 @@ impl Drop for QueryInflightGuard<'_> {
 /// `record_kind` label for a submitted record: `compensation` iff it carries
 /// a `corrects_id`, else `usage`.
 // @cpt-begin:cpt-cf-usage-collector-flow-usage-emission-compensation:p2:inst-compensation-record-kind-label
-fn record_kind_of(record: &UsageRecord) -> RecordKind {
+fn record_kind_of(record: &CreateUsageRecord) -> RecordKind {
     if record.corrects_id.is_some() {
         RecordKind::Compensation
     } else {
@@ -673,13 +676,19 @@ impl Service {
     async fn create_usage_record_inner(
         &self,
         ctx: &SecurityContext,
-        record: UsageRecord,
+        record: CreateUsageRecord,
     ) -> Result<UsageRecord, UsageCollectorError> {
         // @cpt-end:cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization:p1:inst-algo-attrib-receive-ctx
         // @cpt-end:cpt-cf-usage-collector-flow-usage-emission-compensation:p1:inst-compensation-missing-ctx
         // @cpt-end:cpt-cf-usage-collector-flow-usage-emission-compensation:p1:inst-compensation-submit
         // @cpt-end:cpt-cf-usage-collector-flow-usage-emission-emit-record:p1:inst-emit-record-missing-ctx
         // @cpt-end:cpt-cf-usage-collector-flow-usage-emission-emit-record:p1:inst-emit-record-submit
+        // The service is the guaranteed choke point for every caller
+        // (REST + in-process). The create surface is identity-free
+        // (`CreateUsageRecord`); the record acquires its deterministic
+        // dedup-key-derived `id` and its initial `Active` status HERE, before
+        // authorization or dispatch — the single point of derivation.
+        let record = record.into_usage_record();
         // @cpt-begin:cpt-cf-usage-collector-flow-usage-emission-emit-record:p1:inst-emit-record-attrib-authz
         // @cpt-begin:cpt-cf-usage-collector-flow-usage-emission-emit-record:p1:inst-emit-record-pdp-deny
         // @cpt-begin:cpt-cf-usage-collector-flow-usage-emission-compensation:p1:inst-compensation-attrib-authz
@@ -839,7 +848,7 @@ impl Service {
     pub async fn create_usage_record(
         &self,
         ctx: &SecurityContext,
-        record: UsageRecord,
+        record: CreateUsageRecord,
     ) -> Result<UsageRecord, UsageCollectorError> {
         let start = std::time::Instant::now();
         let record_kind = record_kind_of(&record);
@@ -883,7 +892,7 @@ impl Service {
     pub async fn create_usage_records(
         &self,
         ctx: &SecurityContext,
-        records: Vec<UsageRecord>,
+        records: Vec<CreateUsageRecord>,
     ) -> Result<Vec<Result<UsageRecord, UsageCollectorError>>, UsageCollectorError> {
         let start = std::time::Instant::now();
         // @cpt-begin:cpt-cf-usage-collector-flow-usage-emission-emit-records-batch:p1:inst-emit-batch-cap-check
@@ -997,12 +1006,23 @@ impl Service {
     async fn create_usage_records_inner(
         &self,
         ctx: &SecurityContext,
-        records: Vec<UsageRecord>,
+        records: Vec<CreateUsageRecord>,
     ) -> Result<Vec<Result<UsageRecord, UsageCollectorError>>, UsageCollectorError> {
         // @cpt-end:cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization:p1:inst-algo-attrib-receive-ctx
         // The `1..=MAX_BATCH_RECORDS` cap is enforced by the public
         // `create_usage_records` wrapper (before the batch-size observation),
         // so callers of the inner path are already in range.
+
+        // The service is the guaranteed choke point for every caller
+        // (REST + in-process). The create surface is identity-free
+        // (`CreateUsageRecord`); each record acquires its deterministic
+        // dedup-key-derived `id` and its initial `Active` status HERE, before
+        // authorization or dispatch — the single point of derivation.
+        let records: Vec<UsageRecord> = records
+            .into_iter()
+            .map(CreateUsageRecord::into_usage_record)
+            .collect();
+
         let plugin = self
             .resolve_plugin_for(PluginOp::GetUsageType)
             .await
@@ -1842,14 +1862,27 @@ impl Service {
             // its only scan bound. Runs after authz (PDP-first posture).
             require_bounded_time_window(query)?;
 
+            let plugin = self
+                .resolve_plugin_for(PluginOp::GetUsageType)
+                .await
+                .map_err(UsageCollectorError::from)?;
+
+            // Resolve the queried usage type before dispatch: existence (an
+            // unregistered `gts_id` lifts the plugin's `UsageTypeNotFound` to a
+            // pre-dispatch `404`) AND `kind`, so a mismatched `(op, kind)` pair is
+            // rejected as a typed `400` here and the plugin stays pure-persistence.
+            let usage_type = instrument_spi(
+                self.metrics.as_ref(),
+                PluginOp::GetUsageType,
+                plugin.get_usage_type(gts_id.clone()),
+            )
+            .await
+            .map_err(|e| UsageCollectorError::from(DomainError::from(e)))?;
+            require_op_allowed_for_kind(aggregation.op, usage_type.kind, &gts_id)?;
+
             // @cpt-begin:cpt-cf-usage-collector-flow-usage-query-query-aggregated:p1:inst-aggregated-constraint-composition
             let composed = compose_query_with_scope(query, &scope)?;
             // @cpt-end:cpt-cf-usage-collector-flow-usage-query-query-aggregated:p1:inst-aggregated-constraint-composition
-
-            let plugin = self
-                .resolve_plugin_for(PluginOp::QueryAggregatedUsageRecords)
-                .await
-                .map_err(UsageCollectorError::from)?;
 
             // @cpt-begin:cpt-cf-usage-collector-flow-usage-query-query-aggregated:p1:inst-aggregated-plugin-dispatch
             // @cpt-begin:cpt-cf-usage-collector-flow-usage-query-query-aggregated:p1:inst-aggregated-plugin-catch

@@ -36,6 +36,7 @@ time = { workspace = true }
 axum = { workspace = true, features = ["macros"] }
 utoipa = { workspace = true, features = ["time", "decimal"] }
 rust_decimal = { workspace = true }
+bigdecimal = { workspace = true }
 
 # Operational metrics: instruments are declared on a scoped `Meter` from
 # ToolKit's global `SdkMeterProvider` (OTLP push; no gear-local exporter or

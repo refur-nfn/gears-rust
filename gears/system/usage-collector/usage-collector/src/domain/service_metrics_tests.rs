@@ -10,14 +10,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use time::OffsetDateTime;
 use toolkit_gts::gts_id;
 use toolkit_odata::{CursorV1, ODataQuery, Page as ODataPage, PageInfo, SortDir};
 use usage_collector_sdk::{
-    AggregationBucket, AggregationOp, AggregationResult, AggregationSpec, IdempotencyKey,
-    MetadataKey, ResourceRef, UsageCollectorError, UsageKind, UsageRecord, UsageRecordStatus,
-    UsageType, UsageTypeGtsId,
+    AggregationBucket, AggregationOp, AggregationResult, AggregationSpec, CreateUsageRecord,
+    IdempotencyKey, MetadataKey, ResourceRef, UsageCollectorError, UsageKind, UsageRecord,
+    UsageRecordStatus, UsageType, UsageTypeGtsId,
 };
 use uuid::Uuid;
 
@@ -44,7 +45,7 @@ const SAMPLE_GTS_ID: &str = gts_id!("cf.core.uc.usage_record.v1~example.usage._.
 
 fn sample_record() -> UsageRecord {
     UsageRecord {
-        uuid: Uuid::from_u128(0x1234),
+        id: Uuid::from_u128(0x1234),
         gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
         tenant_id: Uuid::from_u128(2),
         resource_ref: ResourceRef::new("rsc-1", "compute.vm").expect("valid resource ref"),
@@ -54,6 +55,23 @@ fn sample_record() -> UsageRecord {
         idempotency_key: IdempotencyKey::new("idem-1").expect("valid idempotency key"),
         corrects_id: None,
         status: UsageRecordStatus::Active,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
+/// The identity-free create-surface twin of [`sample_record`]: mirrors its
+/// canonical fields minus the server-owned `id` / `status`, for the
+/// `create_usage_record{,s}` entry points which now take `CreateUsageRecord`.
+fn sample_create_record() -> CreateUsageRecord {
+    CreateUsageRecord {
+        gts_id: UsageTypeGtsId::new(SAMPLE_GTS_ID).expect("valid gts_id"),
+        tenant_id: Uuid::from_u128(2),
+        resource_ref: ResourceRef::new("rsc-1", "compute.vm").expect("valid resource ref"),
+        subject_ref: None,
+        metadata: BTreeMap::new(),
+        value: Decimal::from(1),
+        idempotency_key: IdempotencyKey::new("idem-1").expect("valid idempotency key"),
+        corrects_id: None,
         created_at: OffsetDateTime::UNIX_EPOCH,
     }
 }
@@ -132,7 +150,7 @@ fn single_bucket_aggregation() -> AggregationResult {
     AggregationResult {
         buckets: vec![AggregationBucket {
             key: Vec::new(),
-            value: Some(Decimal::from(42)),
+            value: Some(BigDecimal::from(42)),
         }],
     }
 }
@@ -148,9 +166,10 @@ fn usage_type_with_metadata_field(key: &str) -> UsageType {
     }
 }
 
-/// A sample record carrying a single `key=value` metadata entry.
-fn record_with_metadata(key: &str, value: &str) -> UsageRecord {
-    let mut record = sample_record();
+/// A sample create-surface submission carrying a single `key=value` metadata
+/// entry (identity-free, for the `create_usage_record{,s}` entry points).
+fn create_record_with_metadata(key: &str, value: &str) -> CreateUsageRecord {
+    let mut record = sample_create_record();
     record.metadata.insert(
         MetadataKey::new(key).expect("valid metadata key"),
         value.to_owned(),
@@ -517,7 +536,7 @@ async fn ingestion_single_deny_records_rejected_authz_and_duration_no_request_co
     );
 
     let _outcome = service
-        .create_usage_record(&authenticated_ctx(), sample_record())
+        .create_usage_record(&authenticated_ctx(), sample_create_record())
         .await;
     provider.force_flush().unwrap();
 
@@ -573,7 +592,10 @@ async fn ingestion_batch_all_denied_observes_batch_size_and_partial_request() {
     );
 
     let result = service
-        .create_usage_records(&authenticated_ctx(), vec![sample_record(), sample_record()])
+        .create_usage_records(
+            &authenticated_ctx(),
+            vec![sample_create_record(), sample_create_record()],
+        )
         .await;
     assert!(
         result.is_ok(),
@@ -733,7 +755,7 @@ async fn pdp_permit_with_foreign_tenant_gate_denial_records_deny_not_permit() {
     );
 
     let outcome = service
-        .create_usage_record(&authenticated_ctx(), sample_record())
+        .create_usage_record(&authenticated_ctx(), sample_create_record())
         .await;
     assert!(
         outcome.is_err(),
@@ -828,7 +850,7 @@ async fn per_record_permit_records_exactly_one_permit_no_double_count() {
     );
 
     service
-        .create_usage_record(&authenticated_ctx(), sample_record())
+        .create_usage_record(&authenticated_ctx(), sample_create_record())
         .await
         .expect("permitted single emit persists");
     provider.force_flush().unwrap();
@@ -983,7 +1005,7 @@ async fn ingestion_single_success_dispatch_records_plugin_call_duration_per_op()
     );
 
     service
-        .create_usage_record(&authenticated_ctx(), sample_record())
+        .create_usage_record(&authenticated_ctx(), sample_create_record())
         .await
         .expect("permitted single emit persists");
     provider.force_flush().unwrap();
@@ -1036,7 +1058,10 @@ async fn ingestion_batch_success_dispatch_records_plugin_call_duration_per_op() 
     );
 
     let per_record = service
-        .create_usage_records(&authenticated_ctx(), vec![sample_record(), sample_record()])
+        .create_usage_records(
+            &authenticated_ctx(),
+            vec![sample_create_record(), sample_create_record()],
+        )
         .await
         .expect("batch returns per-record outcomes, not an outer Err");
     assert!(
@@ -1115,7 +1140,7 @@ async fn ingestion_single_backend_error_increments_accept_errors_per_op() {
     );
 
     let outcome = service
-        .create_usage_record(&authenticated_ctx(), sample_record())
+        .create_usage_record(&authenticated_ctx(), sample_create_record())
         .await;
     assert!(outcome.is_err(), "a persist backend fault surfaces as Err");
     provider.force_flush().unwrap();
@@ -1166,7 +1191,7 @@ async fn ingestion_batch_backend_error_increments_accept_errors_per_op() {
     );
 
     let outcome = service
-        .create_usage_records(&authenticated_ctx(), vec![sample_record()])
+        .create_usage_records(&authenticated_ctx(), vec![sample_create_record()])
         .await;
     assert!(
         outcome.is_err(),
@@ -1216,7 +1241,7 @@ async fn ingestion_batch_unready_plugin_increments_unready_counter() {
     );
 
     let outcome = service
-        .create_usage_records(&authenticated_ctx(), vec![sample_record()])
+        .create_usage_records(&authenticated_ctx(), vec![sample_create_record()])
         .await;
     assert!(
         outcome.is_err(),
@@ -1532,6 +1557,10 @@ async fn query_raw_success_records_success_rows_and_duration() {
 async fn query_aggregated_success_records_success_rows_and_duration() {
     let plugin = HappyPathPlugin::new();
     plugin.set_query_aggregated_usage_records_response(single_bucket_aggregation());
+    // The aggregated path now resolves the usage type pre-dispatch (the
+    // op-per-kind guard): `Sum` is admitted for a counter, so the guard passes
+    // and the aggregate dispatch is reached.
+    plugin.set_get_usage_type(sample_usage_type());
 
     let (service, provider, exporter) = service_with_metrics(
         plugin,
@@ -1620,7 +1649,7 @@ async fn ingestion_single_with_metadata_observes_record_metadata_bytes() {
     service
         .create_usage_record(
             &authenticated_ctx(),
-            record_with_metadata("region", "us-east-1"),
+            create_record_with_metadata("region", "us-east-1"),
         )
         .await
         .expect("a permitted record with declared metadata persists");
@@ -1650,7 +1679,7 @@ async fn ingestion_single_empty_metadata_skips_record_metadata_bytes() {
     );
 
     service
-        .create_usage_record(&authenticated_ctx(), sample_record())
+        .create_usage_record(&authenticated_ctx(), sample_create_record())
         .await
         .expect("a permitted record with no metadata persists");
     provider.force_flush().unwrap();

@@ -96,14 +96,16 @@ gts_instance! {
 
 #[cfg(test)]
 mod tests {
-    use toolkit_gts::{InventoryInstance, gts_id};
+    use toolkit_gts::{GtsId, InventoryInstance, gts_id};
 
     const PERMISSION_TYPE_ID: &str = gts_id!("cf.toolkit.authz.permission.v1~");
-    /// Usage-collector's instance-id namespace segment, appended after
-    /// [`PERMISSION_TYPE_ID`]. Kept as a bare fragment (not a `gts.`-prefixed
-    /// literal) so it is composed with the valid type id at the filter site
-    /// rather than spelled as a malformed standalone GTS string.
-    const UC_INSTANCE_NS: &str = "cf.core.uc.";
+    /// Usage-collector instance-segment coordinates (`cf.core.uc`) — the
+    /// vendor / package / namespace every UC permission instance's concrete
+    /// segment carries. Matched structurally against the parsed GTS segment
+    /// (not by raw-string prefix), so a lookalike namespace cannot slip through.
+    const UC_VENDOR: &str = "cf";
+    const UC_PACKAGE: &str = "core";
+    const UC_NAMESPACE: &str = "uc";
 
     /// One per `(resource_type, action)` the usage-collector REST/PEP surface
     /// enforces.
@@ -122,9 +124,19 @@ mod tests {
         inventory::iter::<InventoryInstance>
             .into_iter()
             .filter(|e| {
-                e.instance_id
-                    .strip_prefix(PERMISSION_TYPE_ID)
-                    .is_some_and(|seg| seg.starts_with(UC_INSTANCE_NS))
+                // Parse the instance id through the GTS grammar rather than
+                // slicing the raw string: select concrete permission instances
+                // (type id == `PERMISSION_TYPE_ID`) whose derivation segment
+                // sits in the usage-collector namespace.
+                let Ok(parsed) = GtsId::try_new(e.instance_id) else {
+                    return false;
+                };
+                parsed.get_type_id().as_deref() == Some(PERMISSION_TYPE_ID)
+                    && parsed.segments().last().is_some_and(|seg| {
+                        seg.vendor() == UC_VENDOR
+                            && seg.package() == UC_PACKAGE
+                            && seg.namespace() == UC_NAMESPACE
+                    })
             })
             .collect()
     }

@@ -22,7 +22,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::gts::{USAGE_RECORD_RESOURCE, USAGE_TYPE_RESOURCE};
-use crate::models::UsageTypeGtsId;
+use crate::models::{AggregationOp, UsageKind, UsageTypeGtsId};
 use crate::reason::{ConflictReason, ValidationReason};
 
 /// Public error envelope for the Usage Collector SDK and REST surfaces.
@@ -317,6 +317,39 @@ impl UsageCollectorError {
         }
     }
 
+    /// Aggregation op requested against a usage kind that does not admit it
+    /// (`SUM` on a gauge, or `MIN`/`MAX`/`AVG` on a counter). Attributes to
+    /// the usage-type resource with the offending `gts_id` as `resource_name`
+    /// and the aggregation operator field as `field`.
+    #[must_use]
+    pub fn aggregation_op_not_allowed_for_kind(
+        op: AggregationOp,
+        kind: UsageKind,
+        gts_id: &UsageTypeGtsId,
+    ) -> Self {
+        let op_str = match op {
+            AggregationOp::Sum => "sum",
+            AggregationOp::Count => "count",
+            AggregationOp::Min => "min",
+            AggregationOp::Max => "max",
+            AggregationOp::Avg => "avg",
+        };
+        let (kind_str, allowed) = match kind {
+            UsageKind::Counter => ("counter", "sum, count"),
+            UsageKind::Gauge => ("gauge", "min, max, avg, count"),
+        };
+        Self::InvalidArgument {
+            resource_type: USAGE_TYPE_RESOURCE.to_owned(),
+            resource_name: Some(gts_id.as_ref().to_owned()),
+            field: "aggregation.op".to_owned(),
+            reason: ValidationReason::OpNotAllowedForKind,
+            detail: format!(
+                "aggregation op `{op_str}` is not valid for {kind_str} usage type \
+                 {gts_id}; {kind_str} allows {{{allowed}}}"
+            ),
+        }
+    }
+
     /// Ingestion supplied a metadata key not declared in the usage type's
     /// closed `metadata_fields`. Attributes to the usage type resource.
     #[must_use]
@@ -342,7 +375,7 @@ impl UsageCollectorError {
         }
     }
 
-    /// Deactivation / get referenced a `UsageRecord.uuid` that does not exist.
+    /// Deactivation / get referenced a `UsageRecord.id` that does not exist.
     #[must_use]
     pub fn usage_record_not_found(id: Uuid) -> Self {
         Self::NotFound {
@@ -406,16 +439,16 @@ impl UsageCollectorError {
     }
 
     /// Same `idempotency_key`, canonical-field-different payload. `name`
-    /// carries the previously persisted record UUID so the caller can
+    /// carries the previously persisted record id so the caller can
     /// reconcile.
     #[must_use]
-    pub fn idempotency_conflict(idempotency_key: &str, existing_uuid: Uuid) -> Self {
+    pub fn idempotency_conflict(idempotency_key: &str, existing_id: Uuid) -> Self {
         Self::Conflict {
             resource_type: USAGE_RECORD_RESOURCE.to_owned(),
-            name: existing_uuid.to_string(),
+            name: existing_id.to_string(),
             reason: ConflictReason::IdempotencyConflict,
             detail: format!(
-                "idempotency key {idempotency_key} already bound to record {existing_uuid}"
+                "idempotency key {idempotency_key} already bound to record {existing_id}"
             ),
         }
     }
@@ -573,23 +606,23 @@ pub enum UsageCollectorPluginError {
 
     /// Idempotency conflict at the persistence boundary: the supplied
     /// `idempotency_key` is already bound to a different stored record.
-    /// Carries the UUID of the previously persisted record (the plugin
-    /// detects the conflict against a specific row, so the row's UUID is
+    /// Carries the id of the previously persisted record (the plugin
+    /// detects the conflict against a specific row, so the row's id is
     /// the actionable handle for the gateway).
-    #[error("idempotency conflict: key {idempotency_key} already bound to record {existing_uuid}")]
+    #[error("idempotency conflict: key {idempotency_key} already bound to record {existing_id}")]
     IdempotencyConflict {
         /// Caller-supplied idempotency key.
         idempotency_key: String,
-        /// `UsageRecord.uuid` of the previously persisted row the key is
+        /// `UsageRecord.id` of the previously persisted row the key is
         /// already bound to.
-        existing_uuid: Uuid,
+        existing_id: Uuid,
     },
 
     /// `get_usage_record` / `deactivate_usage_record` referenced an `id`
     /// that does not exist.
     #[error("usage record not found: {id}")]
     UsageRecordNotFound {
-        /// Caller-supplied target `UsageRecord.uuid`.
+        /// Caller-supplied target `UsageRecord.id`.
         id: Uuid,
     },
 
@@ -597,7 +630,7 @@ pub enum UsageCollectorPluginError {
     /// already `Inactive`.
     #[error("usage record already inactive: {id}")]
     UsageRecordAlreadyInactive {
-        /// Caller-supplied target `UsageRecord.uuid`.
+        /// Caller-supplied target `UsageRecord.id`.
         id: Uuid,
     },
 

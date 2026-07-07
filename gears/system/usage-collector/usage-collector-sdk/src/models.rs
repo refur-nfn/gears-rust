@@ -4,6 +4,7 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
+use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use toolkit_odata_macros::ODataFilterable;
@@ -22,7 +23,9 @@ use crate::error::UsageCollectorError;
 /// `Counter` and `Gauge` are CF-platform-internal kinds with no vendor
 /// extensibility. Serde `deny_unknown_fields` on [`UsageType`] plus the
 /// closed-enum serde shape rejects any other value at the deserialize
-/// boundary.
+/// boundary. The allowed aggregation ops per kind are defined by
+/// [`AggregationOp::is_allowed_for`]: `Counter` admits `{Sum, Count}`;
+/// `Gauge` admits `{Min, Max, Avg, Count}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UsageKind {
@@ -682,8 +685,13 @@ pub enum UsageRecordStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageRecord {
-    /// Caller-supplied record UUID.
-    pub uuid: Uuid,
+    /// Deterministic gateway-derived record identity: `UUIDv5` of the dedup
+    /// key `(tenant_id, gts_id, idempotency_key)` (see
+    /// [`crate::derive_usage_record_id`]). Stamped by
+    /// [`CreateUsageRecord::into_usage_record`] on create and authoritative on
+    /// read / return. The identity cannot be caller-supplied: the create
+    /// surface takes the identity-free [`CreateUsageRecord`], not this type.
+    pub id: Uuid,
     /// Usage type this record attaches to.
     pub gts_id: UsageTypeGtsId,
     /// Owning tenant for this record. Caller-supplied; PDP uses it as the
@@ -728,11 +736,112 @@ pub struct UsageRecord {
     pub created_at: time::OffsetDateTime,
 }
 
+/// Identity-free create submission — the input to every create surface
+/// ([`crate::UsageCollectorClientV1::create_usage_record`] /
+/// [`crate::UsageCollectorClientV1::create_usage_records`]).
+///
+/// This mirrors [`UsageRecord`] minus the two fields a caller cannot own on
+/// create: `id` (a deterministic projection of the dedup key — see
+/// [`Self::into_usage_record`]) and `status` (always [`UsageRecordStatus::Active`]
+/// on a fresh insert). Encoding "id is derived, not supplied" in the type —
+/// rather than a doc-comment on a full [`UsageRecord`] — is what keeps a
+/// caller from constructing a meaningless identity the gateway would only
+/// discard. The wire REST surface encodes the same shape as
+/// `CreateUsageRecordRequest`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateUsageRecord {
+    /// Usage type this record attaches to.
+    pub gts_id: UsageTypeGtsId,
+    /// Owning tenant for this record. Caller-supplied; PDP uses it as the
+    /// `OWNER_TENANT_ID` attribute.
+    pub tenant_id: Uuid,
+    /// Resource attribution composite (mandatory).
+    pub resource_ref: ResourceRef,
+    /// Optional subject attribution composite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_ref: Option<SubjectRef>,
+    /// Caller-supplied metadata. Same validation and closed-shape rules as
+    /// [`UsageRecord::metadata`]. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<MetadataKey, String>,
+    /// Signed numeric measurement value. Same encoding and sign governance as
+    /// [`UsageRecord::value`].
+    #[serde(with = "rust_decimal::serde::str")]
+    pub value: Decimal,
+    /// Mandatory caller-supplied key for at-least-once-with-dedup semantics.
+    pub idempotency_key: IdempotencyKey,
+    /// When set, marks this submission as a counter compensation referencing a
+    /// previously emitted ordinary usage row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrects_id: Option<Uuid>,
+    /// Record creation timestamp (RFC 3339 on the wire). Forwarded verbatim to
+    /// the persisted record.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+impl CreateUsageRecord {
+    /// Project this create submission into the persisted [`UsageRecord`] shape.
+    ///
+    /// This is the single point at which a submission acquires its identity:
+    /// `id` is stamped as the deterministic `UUIDv5` derivation of the dedup
+    /// key `(tenant_id, gts_id, idempotency_key)` (see
+    /// [`crate::derive_usage_record_id`]) and `status` is initialized to
+    /// [`UsageRecordStatus::Active`]. Every other field is forwarded verbatim.
+    /// Because the identity is a pure projection of caller-supplied fields it
+    /// cannot be supplied independently — which is exactly why the create
+    /// surface takes this identity-free type rather than a full
+    /// [`UsageRecord`].
+    #[must_use]
+    pub fn into_usage_record(self) -> UsageRecord {
+        let id =
+            crate::id::derive_usage_record_id(self.tenant_id, &self.gts_id, &self.idempotency_key);
+        UsageRecord {
+            id,
+            gts_id: self.gts_id,
+            tenant_id: self.tenant_id,
+            resource_ref: self.resource_ref,
+            subject_ref: self.subject_ref,
+            metadata: self.metadata,
+            value: self.value,
+            idempotency_key: self.idempotency_key,
+            corrects_id: self.corrects_id,
+            status: UsageRecordStatus::Active,
+            created_at: self.created_at,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Aggregated-query surface
 // ---------------------------------------------------------------------------
 
 /// Aggregation function applied to the filtered `UsageRecord.value` stream.
+///
+/// # Op-per-kind matrix
+///
+/// Each op is valid only for the usage [`UsageKind`] for which it is
+/// semantically meaningful. The gateway enforces this with a typed `400`
+/// (`UsageCollectorError::aggregation_op_not_allowed_for_kind`) before
+/// plugin dispatch — see [`AggregationOp::is_allowed_for`].
+///
+/// | Op                | Counter | Gauge |
+/// |-------------------|:-------:|:-----:|
+/// | `Sum`             |   ✅    |  ❌   |
+/// | `Min`/`Max`/`Avg` |   ❌    |  ✅   |
+/// | `Count`           |   ✅    |  ✅   |
+///
+/// Counter allows `{Sum, Count}`; gauge allows `{Min, Max, Avg, Count}`.
+///
+/// # Compensation handling
+///
+/// `SUM` nets across all active rows regardless of `corrects_id` (counter
+/// compensations reduce the total). Every other op operates over
+/// `corrects_id IS NULL` rows only. Under the matrix that partition is
+/// load-bearing only for `Count`-on-counter; `Min`/`Max`/`Avg` are gauge-only
+/// and gauges never carry compensations, so the filter is a structural no-op
+/// for them.
 ///
 /// `Count` counts matched rows and is well-defined for any value shape. The
 /// other variants require a numeric `value`; non-numeric values surface as a
@@ -750,6 +859,23 @@ pub enum AggregationOp {
     Max,
     /// Mean of matched values.
     Avg,
+}
+
+impl AggregationOp {
+    /// Returns `true` when this op is semantically valid for `kind`.
+    ///
+    /// Counter allows `{Sum, Count}`; gauge allows `{Min, Max, Avg, Count}`
+    /// (see the type-level matrix). This is the single source of truth the
+    /// gateway consults before dispatch.
+    #[must_use]
+    pub fn is_allowed_for(self, kind: UsageKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Count, _)
+                | (Self::Sum, UsageKind::Counter)
+                | (Self::Min | Self::Max | Self::Avg, UsageKind::Gauge)
+        )
+    }
 }
 
 /// Dimension to group an aggregation by.
@@ -813,15 +939,20 @@ pub struct AggregationBucket {
     /// `group_by` was empty (the no-grouping case yields a single bucket).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key: Vec<String>,
-    /// Aggregation result for the bucket, carried as a fixed-precision
-    /// [`Decimal`] so `SUM`, `MIN`, `MAX`, and `COUNT` are exact and
-    /// compensation rows net to zero. `AVG` may carry a plugin-chosen
-    /// rounding scale on non-terminating quotients. `None` when no rows
-    /// matched the bucket (e.g. `MIN` over an empty set). Wire-encoded as
-    /// a JSON string for the same float-round-trip reason as
-    /// [`UsageRecord::value`].
-    #[serde(default, with = "rust_decimal::serde::str_option")]
-    pub value: Option<Decimal>,
+    /// Aggregation result for the bucket, carried as an arbitrary-precision
+    /// [`bigdecimal::BigDecimal`] so `SUM`, `MIN`, `MAX`, and `COUNT` are exact
+    /// at any magnitude and compensation rows net to zero. Postgres `NUMERIC`
+    /// is unbounded, and a wide `SUM` (or large-magnitude `AVG`) can exceed
+    /// [`rust_decimal::Decimal`]'s ~7.9×10²⁸ ceiling — which previously
+    /// surfaced as an `Internal` (HTTP 500) on decode. `AVG` is now exact in
+    /// magnitude but may still carry a backend/plugin-chosen rounding scale on
+    /// non-terminating quotients (arbitrary precision is still finite). `None`
+    /// when no rows matched the bucket (e.g. `MIN` over an empty set).
+    /// Wire-encoded as a JSON string (never a float) for the same round-trip
+    /// reason as [`UsageRecord::value`], via
+    /// [`crate::serde_helpers::bigdecimal_str_option`].
+    #[serde(default, with = "crate::serde_helpers::bigdecimal_str_option")]
+    pub value: Option<BigDecimal>,
 }
 
 /// Aggregated-query result.
@@ -853,10 +984,10 @@ pub struct AggregationResult {
 // `FilterError::UnknownField`, so neither plugins nor the gateway need a
 // runtime reject path.
 //
-// `created_at` and `uuid` ARE on the schema: the gateway treats the
+// `created_at` and `id` ARE on the schema: the gateway treats the
 // `[from, to)` time window as an ordinary `created_at ge … and
 // created_at lt …` predicate inside `$filter` (no separate `TimeWindow`
-// typed parameter), and `uuid` is the canonical cursor tiebreaker the
+// typed parameter), and `id` is the canonical cursor tiebreaker the
 // gateway substitutes into `$orderby` when the caller omits one.
 //
 // Nested attribution composites (`resource_ref`, `subject_ref`) are
@@ -882,12 +1013,12 @@ pub struct AggregationResult {
 #[derive(ODataFilterable)]
 #[allow(dead_code)]
 pub struct UsageRecordQuery {
-    /// `usage_records.uuid` (record primary key). Carried on the filter
+    /// `usage_records.id` (record primary key). Carried on the filter
     /// surface so the gateway can use it as the canonical cursor
-    /// tiebreaker (`(created_at, uuid)`) and so callers can pin a
+    /// tiebreaker (`(created_at, id)`) and so callers can pin a
     /// specific record via `$filter`.
     #[odata(filter(kind = "Uuid"))]
-    pub uuid: Uuid,
+    pub id: Uuid,
     /// `usage_records.created_at` (record creation timestamp). The
     /// `[from, to)` time-window is expressed as
     /// `created_at ge X and created_at lt Y` inside `$filter`; the

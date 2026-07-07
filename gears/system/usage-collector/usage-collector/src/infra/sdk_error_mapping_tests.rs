@@ -200,14 +200,14 @@ fn usage_type_referenced_maps_to_409_aborted() {
 
 #[test]
 fn idempotency_conflict_maps_to_409_aborted() {
-    let existing_uuid = Uuid::from_u128(0xAABB);
+    let existing_id = Uuid::from_u128(0xAABB);
     let c = lift_record(UsageCollectorError::idempotency_conflict(
         "key-1",
-        existing_uuid,
+        existing_id,
     ));
     assert_eq!(c.status_code(), 409);
     assert_eq!(c.resource_type(), Some(USAGE_RECORD_RESOURCE));
-    assert_eq!(c.resource_name(), Some(existing_uuid.to_string().as_str()));
+    assert_eq!(c.resource_name(), Some(existing_id.to_string().as_str()));
 }
 
 #[test]
