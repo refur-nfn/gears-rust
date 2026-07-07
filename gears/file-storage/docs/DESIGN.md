@@ -332,7 +332,7 @@ their credentials requires a restart. Runtime/DB-driven configuration with admin
 | Entity                | Description                                                                                                                                |
 |-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
 | `File`                | Logical file: identity (`file_id`), tenant, owner, gts type, current content pointer (`content_id`), `meta_version`, timestamps. Holds **no** bytes |
-| `Version`             | An immutable content blob of a file: `(file_id, version_id, size, hash_algorithm, hash_value, status, is_current, created_at)`; backend object at `/{file_id}/{version_id}` |
+| `Version`             | An immutable content blob of a file: `(file_id, version_id, size, hash_algorithm, hash_value, hash_mode, part_count, status, is_current, created_at)`; backend object at `/{file_id}/{version_id}`. `hash_mode` (ADR-0006) is `whole-sha256` or `multipart-composite-sha256`; `part_count` is set only for the latter, whose manifest lives in `version_hash_manifest` |
 | `CustomMetadata`      | User-defined key-value pairs attached to a `File`; one row per `(file_id, key)`                                                            |
 | `OwnerPrincipal`      | Tagged union `{User(UserId), App(GearId)}`; carried as `(owner_kind, owner_id)` on `File`                                                |
 | `VersionState`        | Enum `{Pending, Available}`; a version is `Pending` from pre-register until **finalize** (the sidecar's post-`PUT` callback), then `Available`. Binding — swapping which version is the file's current `content_id` — is a separate, later step and does not itself change a version's status |
@@ -764,7 +764,7 @@ intended decomposition. Their detailed designs live in P2/P3 FEATURE artifacts (
 
 | Component (`cpt-cf-file-storage-component-…`)         | Phase | One-line responsibility                                                                                                  | Forward reference                                                                              |
 |-------------------------------------------------------|-------|--------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
-| `multipart-coordinator`                               | P2    | Owns the multipart-upload lifecycle (initiate / part / complete / abort) and the per-part hash combiner — a SHA-256 re-hash of the assembled object at `complete` (see §4.2) | PRD `cpt-cf-file-storage-fr-multipart-upload`                                                  |
+| `multipart-coordinator`                               | P2    | Owns the multipart-upload lifecycle (initiate / part / complete / abort) and the per-part hash combiner — an offset-manifest composite (`root = sha256(manifest)`) built from the per-part digests at `complete`, no re-read (ADR-0006, see §4.2) | PRD `cpt-cf-file-storage-fr-multipart-upload`                                                  |
 | `policy-engine`                                       | P2    | Evaluates tenant/user policies (allowed types, size limits, custom-metadata limits)                                      | PRD `cpt-cf-file-storage-fr-allowed-types-policy`, `…fr-size-limits-policy`                    |
 | `cleanup-engine`                                      | P2    | Unified background process: whole-file retention pruning (age / inactivity / metadata) + orphan reconciliation; deletes files/version rows + backend objects via the sidecar; internal-only, audited. Per-version pruning of superseded (non-current) versions (≤ X versions / age T) is **P3** — deferred pending a versioning-policy schema | PRD `cpt-cf-file-storage-fr-retention-policies`, `…fr-orphan-reconciliation`                   |
 | `audit-publisher`                                     | P2    | Transactional outbox writer + async worker that drains to the platform audit sink                                        | PRD `cpt-cf-file-storage-fr-audit-trail`                                                       |
@@ -807,11 +807,15 @@ architecture the server owns the plan.)
   durable so an upload is resumable and survives a sidecar crash
 - `complete` binds the new version exactly like single-shot (CAS on `content_id`, `412` → rebind)
 
-`part_hash` is a SHA-256 of each part's bytes (`hash::sha256(&data)`); it is persisted but never read back, and
-`complete_multipart` discards the collected part hashes, re-reads the fully assembled object from the backend
-(`GetObject` on S3; an in-memory concat), and computes a fresh SHA-256 over the whole object as the version's
-`hash_value`. [ADR-0006](./ADR/0006-cpt-cf-file-storage-adr-content-hash-modes.md) describes an offset-manifest
-composite mode that folds the per-part digests into a manifest instead, avoiding the re-read; see §4.2 for detail.
+`part_hash` is a SHA-256 of each part's bytes (`hash::sha256(&data)`). Per
+[ADR-0006](./ADR/0006-cpt-cf-file-storage-adr-content-hash-modes.md) (implemented), `complete_multipart` no longer
+re-reads the assembled object: it folds the collected per-part `(offset, part_hash)` pairs into a canonical
+offset-manifest and stores `root = sha256(manifest)` as the version's `hash_value`, with `hash_mode =
+'multipart-composite-sha256'` and `part_count = parts.len()`. The manifest text is persisted in the
+`version_hash_manifest` table (transactionally with the version row) so a client — or `migrate_backend` — can
+re-verify from the object bytes plus the manifest alone, with no dependency on `multipart_upload_parts` surviving.
+Non-multipart uploads keep the plain whole-object SHA-256 (`hash_mode = 'whole-sha256'`, no manifest row). See §4.2
+for detail.
 
 Concrete request/response shapes (envelope fields, error codes, idempotency) are specified in the FEATURE artifact
 ([features/multipart-coordinator.md](./features/multipart-coordinator.md)) and in [api.md](./api.md). **Note**: the

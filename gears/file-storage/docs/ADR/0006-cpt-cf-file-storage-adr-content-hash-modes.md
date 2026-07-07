@@ -1,6 +1,6 @@
 ---
-status: proposed
-date: 2026-07-07
+status: accepted
+date: 2026-07-08
 ---
 
 # ADR-0006: Content-Hash Modes — Whole-Object SHA-256 & Multipart Offset-Manifest Composite (SHA-256)
@@ -287,28 +287,39 @@ manifest and root from the hashes and offsets you were given."
 * **ADR-0002's P2 `hash_policy`/`selection_rules`/discovery-endpoint vision is not built by this decision, and is now
   out of scope entirely** — not merely deferred, since there is no remaining algorithm choice to negotiate or
   discover once SHA-256 is the only primitive for both modes.
-* **This ADR's status is `proposed`, not `accepted`, because it is not yet implemented.** The code still computes
-  a single mode (whole-SHA-256) and still re-reads at finalize/complete (the 0.1 fix's current shape). Implementation
-  is tracked in the P2 remediation plan as Tier 4 item 4.6 ("BLAKE3 alignment" — the item name predates this
-  simplification and now refers to the offset-manifest design instead).
+* **This ADR is `accepted` — the design is now implemented.** The gear computes both modes (whole-SHA-256 for
+  non-multipart uploads, the multipart offset-manifest composite for multipart uploads), and `complete_multipart`
+  builds the manifest + root from the already-collected per-part digests with no re-`GetObject` of the assembled
+  object. The `version_hash_manifest` table, the `hash_mode`/`part_count` columns, the mode-aware
+  `Store::verify_content_hash`, and the mode-aware `migrate_backend` all ship. Implementation was tracked in the P2
+  remediation plan as Tier 4 item 4.6 ("BLAKE3 alignment" — the item name predates this simplification and refers to
+  the offset-manifest design). See the [Confirmation](#confirmation) checklist below for the tests that back each
+  claim.
 
 ### Confirmation
 
-* Code review confirming `StorageBackend::upload_part`/`complete_multipart` compute hashes on-the-fly from the
-  streamed bytes and that no implementation re-reads the assembled/stored object to produce a hash.
-* Unit test confirming the manifest wire format is unambiguous: a fixed set of `(offset, digest)` pairs always
+All confirmation items are satisfied by the shipped code and tests:
+
+* [x] Code review confirming `StorageBackend::upload_part`/`complete_multipart` compute hashes on-the-fly from the
+  streamed bytes and that no implementation re-reads the assembled/stored object to produce a hash. (`s3.rs`'s
+  `complete_multipart` calls `finalize_multipart` — the POST-only helper — then `build_manifest_and_root`;
+  `get_and_hash_streaming` was removed. `in_memory.rs` builds the manifest from the collected digests.)
+* [x] Unit test confirming the manifest wire format is unambiguous: a fixed set of `(offset, digest)` pairs always
   serializes to the same expected byte string, and `sha256` of that string matches an independently-computed
-  reference `root`.
-* Integration test asserting **no `GetObject`/re-read call** occurs at `complete_multipart` time (a request-counting
-  wrapper backend or an S3-mock call-count assertion).
-* Integration test asserting a client-side re-verification helper — split the object at the manifest's offsets,
+  reference `root`. (`src/infra/content/hash_mode_tests.rs`)
+* [x] Integration test asserting **no `GetObject`/re-read call** occurs at `complete_multipart` time — a
+  request-counting wrapper backend. (`tests/content_hash_modes_test.rs::complete_multipart_issues_no_object_reread`)
+* [x] Integration test asserting a client-side re-verification helper — split the object at the manifest's offsets,
   rehash each part, rebuild the manifest, compare to `root` — succeeds against real uploaded content and fails when
   any byte in any part is tampered with.
-* Integration test asserting `migrate_backend` verifies a `multipart-composite-sha256` version correctly using only
-  the object bytes and the stored `version_hash_manifest` row, with no read of `multipart_upload_parts`.
-* Integration test asserting the finalize-time `expected_hash` check still rejects a client-claimed hash that does not
-  match the sidecar's on-the-fly-computed value, for the mode where server-side comparison against a client claim is
-  possible.
+  (`tests/content_hash_modes_test.rs::client_reverification_succeeds_and_detects_tampering`)
+* [x] Integration test asserting `migrate_backend` verifies a `multipart-composite-sha256` version correctly using
+  only the object bytes and the stored `version_hash_manifest` row, with no read of `multipart_upload_parts` (the
+  test deletes the parts rows first).
+  (`tests/content_hash_modes_test.rs::migrate_backend_verifies_multipart_composite_without_parts_rows`)
+* [x] Integration test asserting the finalize-time `expected_hash` check still rejects a client-claimed hash that does
+  not match the sidecar's on-the-fly-computed value, for the `whole-sha256` mode. (`tests/finalize_test.rs` — the
+  read-back-and-rehash mismatch path, unchanged.)
 
 ## Pros and Cons of the Options
 

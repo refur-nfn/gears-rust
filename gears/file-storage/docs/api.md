@@ -64,7 +64,7 @@ Encoding conventions:
 6.  GET    /files/{id}                      file metadata (JSON)                                          — If-None-Match
 7.  DELETE /files/{id}                      delete file + all versions                                    — If-Match
 8.  GET    /files                           list files (filters, paginated; JSON array of metadata)
-9.  GET    /files/{id}/versions             list versions (version_id, size, hash, created_at, is_current)
+9.  GET    /files/{id}/versions             list versions (version_id, size, hash, hash_mode, part_count?, created_at, is_current)
 10. DELETE /files/{id}/versions/{version_id} delete a single, non-current version                          — 409 if current
 11. GET    /storages                        list storages + capabilities inline
 12. GET    /storages/{storage_id}           one storage + capabilities
@@ -88,6 +88,13 @@ Notes:
   [Data-plane callbacks](#data-plane-callbacks-sidecar--control-plane-s2s-token-authenticated)), which marks the
   version `available`. The sidecar never binds: the client must always follow up with an explicit
   `POST /files/{id}/bind` to swap `content_id := version_id` (see "Upload, bind, and the conflict retry" below).
+- `GET /files/{id}/versions` returns a JSON array of version objects. Each carries
+  `{ version_id, mime_type, size, hash_algorithm, hash, hash_mode, part_count?, status, is_current, created_at }`
+  (ADR-0006). `hash` is lowercase-hex; `hash_algorithm` is always `"SHA-256"`. `hash_mode` is `"whole-sha256"` (then
+  `hash` = `sha256(object bytes)` and `part_count` is omitted) or `"multipart-composite-sha256"` (then `hash` =
+  `sha256(manifest)`, the offset-manifest composite root, and `part_count` is the number of parts). The manifest text
+  itself is stored server-side (`version_hash_manifest`) and used by `migrate_backend`/re-verification; it is not
+  currently surfaced as a REST field.
 - `GET /files/{id}/download-url` returns `{ download_url, etag, version_id }`. By default it pins the current
   `content_id`; `?version_id=<v>` pins a specific version.
 - Restoring a prior version is `POST /files/{id}/bind` with that `version_id` (a pointer swap, no re-upload).

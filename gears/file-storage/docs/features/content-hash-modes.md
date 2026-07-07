@@ -2,7 +2,7 @@ Created:  2026-07-07 by Constructor Tech
 Updated:  2026-07-07 by Constructor Tech
 # Feature: Content-Hash Modes
 
-- [ ] `p2` - **ID**: `cpt-cf-file-storage-featstatus-content-hash-modes-implemented`
+- [x] `p2` - **ID**: `cpt-cf-file-storage-featstatus-content-hash-modes-implemented`
 
 
 
@@ -43,11 +43,11 @@ Updated:  2026-07-07 by Constructor Tech
 
 ## 1. Feature Context
 
-- [ ] `p2` - `cpt-cf-file-storage-feature-content-hash-modes`
+- [x] `p2` - `cpt-cf-file-storage-feature-content-hash-modes`
 
 ### 1.1 Overview
 
-**Status: proposed / design analysis only — not yet implemented, no Rust changed.** Exactly two content-hash modes
+**Status: implemented (ADR-0006 `accepted`).** Exactly two content-hash modes
 for file-storage, both SHA-256, distinguished only by upload path (non-multipart vs. multipart), never by user or
 operator choice: (1) non-multipart uploads keep the existing plain `sha256(whole object bytes)`; (2) multipart uploads
 switch to a **SHA-256 offset-manifest composite** — a canonical manifest recording each part's byte offset and
@@ -61,7 +61,7 @@ egress/bandwidth) on every completed multipart upload — while the per-part SHA
 `multipart_upload_parts` are written but never read back. This feature closes that gap on-the-fly (no re-read) while
 also making the multipart digest **independently client-verifiable** from the object bytes plus the small, durable
 manifest the API returns, with no dependency on retaining multipart-session state. It formalizes the decision in
-[ADR-0006](../ADR/0006-cpt-cf-file-storage-adr-content-hash-modes.md) (`status: proposed`), which supersedes
+[ADR-0006](../ADR/0006-cpt-cf-file-storage-adr-content-hash-modes.md) (`status: accepted`), which supersedes
 [ADR-0002](../ADR/0002-cpt-cf-file-storage-adr-content-hash-selection.md)'s P2 `hash_policy`/selection-rules vision
 for the content-hash-modes decision specifically — that vision is dropped entirely, not merely deferred, because
 SHA-256 is the only algorithm for both modes and there is no remaining choice to configure or discover.
@@ -84,7 +84,7 @@ SHA-256 is the only algorithm for both modes and there is no remaining choice to
 - **Design**: [DESIGN.md](../DESIGN.md) — §"Multipart upload — P2" and the hash/ETag pipeline section (corrected by
   this feature's Stage 3, §7 below)
 - **ADR**: [ADR-0006](../ADR/0006-cpt-cf-file-storage-adr-content-hash-modes.md) — Content-hash modes decision record
-  this feature implements (`status: proposed`, not yet implemented)
+  this feature implements (`status: accepted`, implemented)
 - **ADR**: [ADR-0002](../ADR/0002-cpt-cf-file-storage-adr-content-hash-selection.md) — Content hash selection; its P2
   `hash_policy`/selection-rules vision is superseded by ADR-0006 for this decision specifically
 - **Dependencies**: [Multipart Upload Coordinator](multipart-coordinator.md)
@@ -135,7 +135,7 @@ Internal system functions that do not interact with actors directly; called by a
 
 ### Build Offset-Manifest at Complete
 
-- [ ] `p1` - **ID**: `cpt-cf-file-storage-algo-content-hash-modes-build-manifest`
+- [x] `p1` - **ID**: `cpt-cf-file-storage-algo-content-hash-modes-build-manifest`
 
 **Input**: ordered list of `(part_number, offset, part_hash)` from `multipart_upload_parts` (already collected
 during upload; `offset` from the multipart plan's `compute_plan` output, `part_hash = sha256(part_bytes)` already
@@ -144,15 +144,15 @@ computed per-part)
 **Output**: `(manifest: Manifest, root: [u8; 32])`
 
 **Steps**:
-1. [ ] - `p1` - Sort entries by ascending byte offset (identical to ascending part-number order for any valid plan) - `inst-buildmanifest-sort`
-2. [ ] - `p1` - FOR EACH entry: serialize as `{offset}:{64-lowercase-hex-digest}` per the canonical grammar (§3 below) - `inst-buildmanifest-serialize-entry`
-3. [ ] - `p1` - Concatenate entries with `,` separators, prefixed by the `v1,` version token, with no trailing delimiter and no whitespace - `inst-buildmanifest-concat`
-4. [ ] - `p1` - Compute `root = sha256(manifest_bytes)` where `manifest_bytes` is the manifest string's UTF-8 encoding - `inst-buildmanifest-root`
-5. [ ] - `p1` - **RETURN** `(manifest, root)` — no `GetObject`/re-read of the assembled object occurs at any step - `inst-buildmanifest-return`
+1. [x] - `p1` - Sort entries by ascending byte offset (identical to ascending part-number order for any valid plan) - `inst-buildmanifest-sort`
+2. [x] - `p1` - FOR EACH entry: serialize as `{offset}:{64-lowercase-hex-digest}` per the canonical grammar (§3 below) - `inst-buildmanifest-serialize-entry`
+3. [x] - `p1` - Concatenate entries with `,` separators, prefixed by the `v1,` version token, with no trailing delimiter and no whitespace - `inst-buildmanifest-concat`
+4. [x] - `p1` - Compute `root = sha256(manifest_bytes)` where `manifest_bytes` is the manifest string's UTF-8 encoding - `inst-buildmanifest-root`
+5. [x] - `p1` - **RETURN** `(manifest, root)` — no `GetObject`/re-read of the assembled object occurs at any step - `inst-buildmanifest-return`
 
 ### Mode-Aware Content-Hash Verification
 
-- [ ] `p1` - **ID**: `cpt-cf-file-storage-algo-content-hash-modes-verify`
+- [x] `p1` - **ID**: `cpt-cf-file-storage-algo-content-hash-modes-verify`
 
 **Input**: `blob` (object bytes), `hash_mode`, `hash_value`, `manifest: Option<&str>` (required when
 `hash_mode == multipart-composite-sha256`, absent otherwise)
@@ -160,12 +160,12 @@ computed per-part)
 **Output**: `Ok(())` or a hash-mismatch error
 
 **Steps**:
-1. [ ] - `p1` - **IF** `hash_mode == whole-sha256`: compute `sha256(blob)`; compare to `hash_value`; RETURN mismatch error if unequal - `inst-verify-whole`
-2. [ ] - `p1` - **ELSE** (`hash_mode == multipart-composite-sha256`, `manifest` MUST be present): parse `manifest` into ordered `(offset, digest)` entries - `inst-verify-parse-manifest`
-3. [ ] - `p1` - FOR EACH parsed entry: slice `blob` at `offset` (final entry's length derives from the object's known `size`); compute `sha256` of the slice; compare to the entry's recorded digest; RETURN mismatch error (naming the diverging offset) if unequal - `inst-verify-per-part`
-4. [ ] - `p1` - Re-serialize the manifest from the recomputed digests using the exact grammar in §3 below - `inst-verify-reserialize`
-5. [ ] - `p1` - Compute `sha256(reserialized_manifest)`; compare to `hash_value` (`root`); RETURN mismatch error if unequal - `inst-verify-root-compare`
-6. [ ] - `p1` - **RETURN** `Ok(())` - `inst-verify-return`
+1. [x] - `p1` - **IF** `hash_mode == whole-sha256`: compute `sha256(blob)`; compare to `hash_value`; RETURN mismatch error if unequal - `inst-verify-whole`
+2. [x] - `p1` - **ELSE** (`hash_mode == multipart-composite-sha256`, `manifest` MUST be present): parse `manifest` into ordered `(offset, digest)` entries - `inst-verify-parse-manifest`
+3. [x] - `p1` - FOR EACH parsed entry: slice `blob` at `offset` (final entry's length derives from the object's known `size`); compute `sha256` of the slice; compare to the entry's recorded digest; RETURN mismatch error (naming the diverging offset) if unequal - `inst-verify-per-part`
+4. [x] - `p1` - Re-serialize the manifest from the recomputed digests using the exact grammar in §3 below - `inst-verify-reserialize`
+5. [x] - `p1` - Compute `sha256(reserialized_manifest)`; compare to `hash_value` (`root`); RETURN mismatch error if unequal - `inst-verify-root-compare`
+6. [x] - `p1` - **RETURN** `Ok(())` - `inst-verify-return`
 
 This single algorithm is shared by three call sites: the client-side flow above, the control plane's
 `Store::verify_content_hash` (used by single-part finalize), and `migrate_backend`'s destination-write verification —
@@ -183,7 +183,7 @@ feature and remains owned by `cpt-cf-file-storage-feature-multipart-coordinator`
 
 ### Groundwork — Hash-Mode Types & Manifest Wire Format
 
-- [ ] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-groundwork`
+- [x] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-groundwork`
 
 The system **MUST** introduce `HashMode`, `ManifestEntry`, and `Manifest` types (`src/infra/content/hash_mode.rs`,
 alongside the existing `hash.rs`), with `Manifest::to_wire_string()`/`from_wire_string()` implementing the canonical
@@ -199,7 +199,7 @@ independently-computed reference `root`.
 
 ### Schema Migration — hash_mode, part_count, version_hash_manifest
 
-- [ ] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-schema`
+- [x] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-schema`
 
 The system **MUST** add `hash_mode` (`'whole-sha256'` | `'multipart-composite-sha256'`, default `'whole-sha256'`) and
 `part_count` (`NOT NULL` only for the multipart mode) to `file_versions`, plus a new `version_hash_manifest` table
@@ -220,7 +220,7 @@ whether the upload will end up single- or multi-part).
 
 ### Multipart-Composite-SHA-256 Implementation
 
-- [ ] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-multipart-composite`
+- [x] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-multipart-composite`
 
 The system **MUST** widen `StorageBackend::upload_part`/`complete_multipart` (§7 below) so every multipart-capable
 backend (`S3Backend`, `InMemoryBackend`) builds the manifest and its `root` from the already-collected
@@ -242,7 +242,7 @@ mode-aware per `cpt-cf-file-storage-algo-content-hash-modes-verify`.
 
 ### Documentation Updates
 
-- [ ] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-docs`
+- [x] `p2` - **ID**: `cpt-cf-file-storage-dod-content-hash-modes-docs`
 
 The system **MUST** correct `DESIGN.md`'s stale hash-design passages and `docs/api.md`'s metadata/upload response
 shapes to surface `hash_mode`, `part_count`, and (for multipart-composite versions) `manifest` once implemented;
@@ -256,28 +256,27 @@ shapes to surface `hash_mode`, `part_count`, and (for multipart-composite versio
 
 ## 6. Acceptance Criteria
 
-- [ ] The manifest wire format round-trips byte-identically: a fixed set of `(offset, digest)` pairs always
+- [x] The manifest wire format round-trips byte-identically: a fixed set of `(offset, digest)` pairs always
   serializes to the same expected string, and `sha256` of that string matches an independently-computed reference `root`
-- [ ] `complete_multipart` for a `multipart-composite-sha256` version issues no `GetObject`/re-read of the assembled
+- [x] `complete_multipart` for a `multipart-composite-sha256` version issues no `GetObject`/re-read of the assembled
   object — verified by a request-counting wrapper backend or S3-mock call-count assertion
-- [ ] A client-side re-verification helper (split the object at the manifest's offsets, rehash, rebuild, compare to
+- [x] A client-side re-verification helper (split the object at the manifest's offsets, rehash, rebuild, compare to
   `root`) succeeds against real uploaded content and fails when any byte in any part is tampered with
-- [ ] `migrate_backend` verifies a `multipart-composite-sha256` version using only the object bytes and the stored
+- [x] `migrate_backend` verifies a `multipart-composite-sha256` version using only the object bytes and the stored
   `version_hash_manifest` row, with no dependency on `multipart_upload_parts` surviving past the multipart session's
   own lifecycle
-- [ ] `hash_algorithm`'s `CHECK (hash_algorithm = 'SHA-256')` is unchanged; no second hash algorithm, Cargo dependency,
+- [x] `hash_algorithm`'s `CHECK (hash_algorithm = 'SHA-256')` is unchanged; no second hash algorithm, Cargo dependency,
   or FIPS feature gate is introduced anywhere in the implementation
-- [ ] Every pre-existing `file_versions` row backfills to `hash_mode = 'whole-sha256'`, `part_count = NULL`, with no
+- [x] Every pre-existing `file_versions` row backfills to `hash_mode = 'whole-sha256'`, `part_count = NULL`, with no
   data migration/re-hashing and no `version_hash_manifest` row
-- [ ] The finalize-time `expected_hash` client-claim check continues to reject a mismatched client-supplied hash for
+- [x] The finalize-time `expected_hash` client-claim check continues to reject a mismatched client-supplied hash for
   the `whole-sha256` mode, unchanged
 
 ## 7. Detailed Design Reference
 
-Status: **draft / design analysis only** — no Rust changed, nothing committed.
-This design is formalized as a decision record in
+Status: **implemented**. This design is formalized as a decision record in
 [ADR-0006](../ADR/0006-cpt-cf-file-storage-adr-content-hash-modes.md)
-(`status: proposed` — not yet implemented); ADR-0006 supersedes ADR-0002's P2
+(`status: accepted`); ADR-0006 supersedes ADR-0002's P2
 vision for the content-hash-modes decision specifically.
 Scope: `gears/file-storage/file-storage` (control plane, sidecar, `StorageBackend`
 trait, DB schema).
