@@ -70,18 +70,25 @@ The **P1 control plane** is implemented and tested. Highlights:
 Built on top of P1, the following shipped:
 
 - **Policy engine** — allowed-types / size / custom-metadata-limit policies, resolved at tenant and user scope
-  (`GET`/`PUT /policy`, `GET /policy/effective`).
+  (`GET`/`PUT /policy`, `GET /policy/effective`). See
+  [docs/features/policy-engine.md](docs/features/policy-engine.md).
 - **Retention rules + background cleanup sweep** — per-tenant retention rules (`/retention-rules`) plus a background
-  process that prunes expired files and reconciles orphaned backend objects.
+  process that prunes expired files and reconciles orphaned backend objects. See
+  [docs/features/retention-cleanup.md](docs/features/retention-cleanup.md).
 - **Idempotent create** — `POST /files` is safe to retry.
 - **Audit outbox** — a transactional outbox recording write operations (create, finalize, bind, metadata update,
-  delete, ownership transfer, backend migration, …) for downstream audit consumption.
+  delete, ownership transfer, backend migration, …) for downstream audit consumption. The write side is fully
+  shipped and tested; **the drain/relay side is not implemented** — see
+  [docs/features/audit-trail.md](docs/features/audit-trail.md) for the tracked gap.
 - **Events outbox** — file lifecycle events (`file.content_updated`, `file.owner_transferred`, …) are written
   transactionally alongside the mutation. **Not yet drained** to the platform EventBroker — see Tier 4 item 4.1 in
-  the P2 remediation plan.
+  the P2 remediation plan (same undrained-relay gap as the audit outbox above).
 - **Ownership transfer** — `POST /files/{id}/transfer`, atomic owner swap with audit + event + usage-delta reporting.
+  Target-owner validation is **partial** — only the nil-UUID sentinel is rejected; see
+  [docs/features/ownership-transfer.md](docs/features/ownership-transfer.md) for the tracked gap.
 - **Backend migration** — `POST /files/{id}/migrate`, relocates a non-versioned file's content to a different backend
-  with a verified content-hash check before committing.
+  with a verified, mode-aware content-hash check before committing. See
+  [docs/features/backend-migration.md](docs/features/backend-migration.md).
 - **Multipart upload** — server-authoritative parts plan, per-part signed URLs, and the sidecar's report-part
   callback are wired end-to-end. **Functional only against a `multipart_native` backend** (today: the non-durable
   in-memory backend, dev/test only) — the default `local-fs` backend does not declare `multipart_native`, so
