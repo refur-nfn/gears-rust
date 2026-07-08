@@ -317,6 +317,8 @@ async fn finalize_negative_size_is_rejected_with_400_not_500() {
         upload: file_storage::infra::signed_url::UploadConstraints::default(),
         multipart: file_storage::infra::signed_url::MultipartClaims::default(),
         request_id: "test-request-id".to_owned(),
+        content_type: String::new(),
+        etag: String::new(),
     };
     let err = svc
         .finalize_upload_by_token(&claims, -1, vec![0u8; 32])
@@ -394,12 +396,18 @@ async fn finalize_via_router_with_hash_len(hash_byte_len: usize) -> (StatusCode,
         + "fs-token=".len();
     let token = ticket.upload_url[token_start..].to_owned();
 
+    // P2 0.1 remaining: `finalize_version` now also requires a `FinalizeAuth`
+    // extension. `None` reproduces this test's pre-existing behavior (no
+    // internal-secret gate configured, token-only trust model).
+    let finalize_auth = Arc::new(handlers::FinalizeAuth::new(None));
+
     let router = Router::new()
         .route(
             "/api/file-storage/v1/files/{file_id}/versions/{version_id}/finalize",
             post(handlers::finalize_version),
         )
         .layer(axum::Extension(Arc::clone(&verifier)))
+        .layer(axum::Extension(finalize_auth))
         .layer(axum::Extension(Arc::clone(&svc)));
 
     let body = serde_json::json!({

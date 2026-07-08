@@ -139,6 +139,48 @@ fn default_require_signing_key_seed_is_true() {
 }
 
 #[test]
+fn require_finalize_internal_secret_without_secret_fails_validate() {
+    // Mirrors `validate_rejects_missing_signing_key_seed_when_required_flag_set`:
+    // a missing shared secret with the require flag set must fail fast
+    // instead of silently downgrading to the token-only trust model for the
+    // finalize/report-part s2s callbacks (P2 0.1 remaining).
+    let cfg = FileStorageConfig {
+        require_signing_key_seed: false,
+        finalize_internal_secret: None,
+        require_finalize_internal_secret: true,
+        ..FileStorageConfig::default()
+    };
+    assert!(
+        cfg.validate().is_err(),
+        "a missing finalize_internal_secret must be rejected when \
+         require_finalize_internal_secret is true"
+    );
+}
+
+#[test]
+fn require_finalize_internal_secret_with_secret_passes_validate() {
+    let cfg = FileStorageConfig {
+        require_signing_key_seed: false,
+        finalize_internal_secret: Some("interim-shared-secret".to_owned()),
+        require_finalize_internal_secret: true,
+        ..FileStorageConfig::default()
+    };
+    assert!(
+        cfg.validate().is_ok(),
+        "a present finalize_internal_secret must pass validation even when required"
+    );
+}
+
+#[test]
+fn default_require_finalize_internal_secret_is_false() {
+    assert!(
+        !FileStorageConfig::default().require_finalize_internal_secret,
+        "require_finalize_internal_secret must default to false so existing deployments \
+         and not-yet-redeployed sidecars keep working"
+    );
+}
+
+#[test]
 fn default_enable_background_sweep_is_true() {
     assert!(
         FileStorageConfig::default().enable_background_sweep,

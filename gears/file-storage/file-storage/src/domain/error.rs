@@ -87,6 +87,11 @@ pub enum DomainError {
     #[error("Multipart upload session {upload_id} is not in progress (state: {state})")]
     MultipartUploadNotInProgress { upload_id: Uuid, state: String },
 
+    /// 409 — `complete` was called while one or more planned parts have not
+    /// been reported yet.
+    #[error("Multipart upload {upload_id}: parts missing: {missing:?}")]
+    MultipartPartsMissing { upload_id: Uuid, missing: Vec<u32> },
+
     /// 409 — backend migration was requested for a versioned file (>1 version).
     ///
     /// @cpt-cf-file-storage-fr-backend-migration
@@ -224,6 +229,12 @@ impl DomainError {
             upload_id,
             state: state.into(),
         }
+    }
+
+    /// 409 — `complete` was called with one or more planned parts unreported.
+    #[must_use]
+    pub fn multipart_parts_missing(upload_id: Uuid, missing: Vec<u32>) -> Self {
+        Self::MultipartPartsMissing { upload_id, missing }
     }
 
     /// 409 — the file has multiple versions and cannot be migrated between backends.

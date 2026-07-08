@@ -135,6 +135,69 @@ async fn build_all(
     (svc, psvc, msvc, dp, store, engine, backend)
 }
 
+/// Like [`build_all`], but also returns the raw `DBProvider` handle. Used by
+/// the P2 2.8 live-multipart-session-guard tests below, which need to
+/// backdate a `file_versions.created_at` / `multipart_uploads.expires_at`
+/// value directly through the entity layer -- there is no public API to
+/// backdate either column on an already-created row.
+async fn build_all_with_db(
+    grace_secs: u64,
+) -> (
+    Arc<FileService>,
+    Arc<MultipartService>,
+    Store,
+    CleanupEngine,
+    Arc<DBProvider<DbError>>,
+) {
+    let db = build_db().await;
+
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+
+    let sweep_store: Arc<dyn CleanupStore> = Arc::new(store.clone());
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let sweep_backends = backends.clone();
+
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        issuer,
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        multipart_store,
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        Arc::new(Issuer::generate(3600).expect("issuer")),
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let engine = CleanupEngine::new(
+        sweep_store,
+        sweep_backends,
+        CleanupConfig {
+            orphan_grace_secs: grace_secs,
+        },
+    );
+    (svc, msvc, store, engine, db)
+}
+
 /// Build a service + cleanup engine with TWO in-memory backends ("mem" and "alt").
 async fn build_all_dual_backend(
     grace_secs: u64,
@@ -220,8 +283,11 @@ impl CleanupStore for FaultyListVersionsStore {
     async fn list_abandoned_pending_versions(
         &self,
         older_than: time::OffsetDateTime,
+        now: time::OffsetDateTime,
     ) -> Result<Vec<FileVersion>, DomainError> {
-        self.inner.list_abandoned_pending_versions(older_than).await
+        self.inner
+            .list_abandoned_pending_versions(older_than, now)
+            .await
     }
 
     async fn delete_version(
@@ -645,6 +711,169 @@ async fn expired_multipart_session_is_aborted_by_sweep() {
         aborted_session.state,
         file_storage::domain::multipart::MultipartUploadState::Aborted,
         "backdated session must be aborted after sweep"
+    );
+}
+
+/// P2 remediation 2.8 (remaining): the abandoned-pending sweep must not
+/// reclaim a pending version that still backs a **live** `in_progress`
+/// multipart session, no matter how old that version is. Before this fix
+/// `list_pending_older_than` keyed solely on `(status, created_at)`, so a
+/// long-running upload (big file, generous URL TTL) that outlives
+/// `orphan_grace_secs` would have its backing version deleted out from under
+/// it -- and the eventual `complete_multipart_upload` would fail at
+/// `finalize_version`, losing the whole upload's work.
+///
+/// @cpt-cf-file-storage-fr-orphan-reconciliation
+#[tokio::test]
+async fn sweep_skips_pending_version_of_active_multipart_session() {
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureUpdateExt;
+
+    use file_storage::infra::storage::entity::file_version::{
+        Column as FileVersionColumn, Entity as FileVersionEntity,
+    };
+
+    // grace = 1 hour so the file's own creation-time pending version (which
+    // stays fresh) is never itself a sweep candidate -- only the
+    // deliberately backdated multipart-session version is.
+    let (svc, msvc, store, engine, db) = build_all_with_db(3600).await;
+    let tenant = Uuid::now_v7();
+    let ctx = ctx(tenant);
+
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let plan = msvc
+        .initiate_multipart_upload(&ctx, ticket.file_id, "text/plain", 1024, None, None)
+        .await
+        .unwrap();
+
+    // Backdate the multipart session's backing version's `created_at` well
+    // past the grace cutoff -- simulating a long-running upload -- while
+    // leaving the session's `expires_at` untouched (still far in the
+    // future; `default_url_ttl_secs = 3600` in `build_all_with_db`).
+    let conn = db.conn().expect("conn");
+    let backdated = time::OffsetDateTime::now_utc() - time::Duration::hours(2);
+    FileVersionEntity::update_many()
+        .col_expr(FileVersionColumn::CreatedAt, Expr::value(backdated))
+        .filter(FileVersionColumn::VersionId.eq(plan.version_id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .exec(&conn)
+        .await
+        .expect("backdate version created_at");
+
+    let result = engine.run_sweep().await;
+    assert_eq!(
+        result.abandoned_pending_deleted, 0,
+        "a pending version backing a live multipart session must not be reclaimed"
+    );
+
+    let version_after = store
+        .get_version(ticket.file_id, plan.version_id)
+        .await
+        .unwrap();
+    assert!(
+        version_after.is_some(),
+        "the multipart session's backing version must survive the sweep"
+    );
+
+    let session_after = store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must still exist");
+    assert_eq!(
+        session_after.state,
+        file_storage::domain::multipart::MultipartUploadState::InProgress,
+        "the live session must survive the sweep untouched"
+    );
+}
+
+/// Companion to [`sweep_skips_pending_version_of_active_multipart_session`]:
+/// once the same session's `expires_at` has also passed, it is no longer
+/// "live" from the sweep's perspective -- `sweep_expired_multipart` aborts
+/// it, and its now-unprotected backing version becomes reclaimable.
+///
+/// @cpt-cf-file-storage-fr-orphan-reconciliation
+#[tokio::test]
+async fn sweep_reclaims_version_after_session_expires() {
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureUpdateExt;
+
+    use file_storage::infra::storage::entity::file_version::{
+        Column as FileVersionColumn, Entity as FileVersionEntity,
+    };
+    use file_storage::infra::storage::entity::multipart_upload::{
+        Column as MultipartUploadColumn, Entity as MultipartUploadEntity,
+    };
+
+    let (svc, msvc, store, engine, db) = build_all_with_db(3600).await;
+    let tenant = Uuid::now_v7();
+    let ctx = ctx(tenant);
+
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let plan = msvc
+        .initiate_multipart_upload(&ctx, ticket.file_id, "text/plain", 1024, None, None)
+        .await
+        .unwrap();
+
+    let conn = db.conn().expect("conn");
+    let now = time::OffsetDateTime::now_utc();
+
+    // Same backdated `created_at` as the sibling test above.
+    let backdated_created = now - time::Duration::hours(2);
+    FileVersionEntity::update_many()
+        .col_expr(FileVersionColumn::CreatedAt, Expr::value(backdated_created))
+        .filter(FileVersionColumn::VersionId.eq(plan.version_id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .exec(&conn)
+        .await
+        .expect("backdate version created_at");
+
+    // ...but this time the session's `expires_at` has also passed.
+    let backdated_expiry = now - time::Duration::seconds(10);
+    MultipartUploadEntity::update_many()
+        .col_expr(
+            MultipartUploadColumn::ExpiresAt,
+            Expr::value(backdated_expiry),
+        )
+        .filter(MultipartUploadColumn::UploadId.eq(plan.upload_id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .exec(&conn)
+        .await
+        .expect("backdate session expires_at");
+
+    let result = engine.run_sweep().await;
+    assert_eq!(
+        result.expired_multipart_aborted, 1,
+        "the now-expired session must be aborted"
+    );
+    assert_eq!(
+        result.abandoned_pending_deleted, 1,
+        "the version must be reclaimed once its session is no longer live"
+    );
+
+    let version_after = store
+        .get_version(ticket.file_id, plan.version_id)
+        .await
+        .unwrap();
+    assert!(
+        version_after.is_none(),
+        "the pending version must be gone once the multipart session is no longer live"
+    );
+
+    let session_after = store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("the session row itself is aborted, not deleted");
+    assert_eq!(
+        session_after.state,
+        file_storage::domain::multipart::MultipartUploadState::Aborted,
+        "the session must be aborted once its expiry has passed"
     );
 }
 
@@ -1358,7 +1587,7 @@ async fn complete_one_part_multipart_upload(
         .await
         .unwrap();
 
-    msvc.complete_multipart_upload(ctx, file_id, plan.upload_id)
+    msvc.complete_multipart_upload(ctx, file_id, plan.upload_id, None)
         .await
         .unwrap();
     svc.bind(ctx, file_id, plan.version_id, None).await.unwrap();
@@ -1490,7 +1719,7 @@ async fn sweep_before_complete_wins_cleans_up_expired_session() {
 
     // A subsequent complete attempt for the same upload_id must be rejected.
     let err = msvc
-        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap_err();
     assert!(
@@ -1538,7 +1767,7 @@ async fn complete_after_session_expired_is_rejected() {
         .unwrap();
 
     let err = msvc
-        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap_err();
     assert!(

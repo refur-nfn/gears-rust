@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use sea_orm_migration::MigratorTrait;
 use toolkit_db::migration_runner::run_migrations_for_testing;
@@ -22,7 +24,7 @@ use file_storage::domain::etag;
 use file_storage::domain::ports::DataPlanePort;
 use file_storage::domain::service::{FileService, ServiceConfig};
 use file_storage::infra::backend::{BackendRegistry, InMemoryBackend, StorageBackend};
-use file_storage::infra::signed_url::Issuer;
+use file_storage::infra::signed_url::{Claims, Issuer};
 use file_storage::infra::storage::Store;
 use file_storage::infra::storage::migrations::Migrator;
 use file_storage_sdk::{CustomMetadataEntry, CustomMetadataPatch, NewFile, OwnerFilter, OwnerKind};
@@ -695,5 +697,56 @@ async fn delete_version_then_bind_cannot_dangle() {
     assert!(
         still_there.is_some(),
         "content_id must never dangle at a deleted version"
+    );
+}
+
+/// P2 1.11: `download_url`'s minted `op = get` token must carry the
+/// version's real stored MIME and content ETag as `content_type`/`etag`
+/// claims, so the sidecar (no DB access) can echo real `Content-Type`/`ETag`
+/// response headers. Decodes the token's base64url JSON payload directly —
+/// acceptable in a test asserting the minter's own internal contract, even
+/// though the token is otherwise opaque to every other party (ADR-0004's
+/// Token Opacity Contract).
+#[tokio::test]
+async fn download_url_token_carries_version_mime_and_etag() {
+    let (svc, dp) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    dp.put_content(
+        &ctx,
+        ticket.file_id,
+        ticket.version_id,
+        "text/plain",
+        Bytes::from_static(b"hello world"),
+    )
+    .await
+    .unwrap();
+    svc.bind(&ctx, ticket.file_id, ticket.version_id, None)
+        .await
+        .unwrap();
+
+    let dl = svc.download_url(&ctx, ticket.file_id, None).await.unwrap();
+
+    let token = dl
+        .download_url
+        .split("fs-token=")
+        .nth(1)
+        .expect("download_url carries an fs-token query param");
+    let payload_b64 = token
+        .split('.')
+        .next()
+        .expect("token has a payload segment");
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .expect("valid base64url payload");
+    let claims: Claims = serde_json::from_slice(&payload).expect("valid claims JSON");
+
+    assert_eq!(claims.content_type, "text/plain", "declared file mime_type");
+    let expected_etag = etag::content_etag(ticket.file_id, ticket.version_id);
+    assert_eq!(claims.etag, expected_etag);
+    assert_eq!(
+        claims.etag, dl.etag,
+        "one source of truth as the ticket's own etag"
     );
 }

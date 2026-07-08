@@ -12,6 +12,10 @@
 
 use std::sync::Arc;
 
+use axum::extract::Path;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::{Extension, Json};
 use bytes::Bytes;
 use sea_orm_migration::MigratorTrait;
 use toolkit_db::migration_runner::run_migrations_for_testing;
@@ -19,8 +23,13 @@ use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
+use file_storage::api::rest::handlers::{
+    FinalizeAuth, FinalizeUploadReq, ReportPartReq, finalize_version, report_multipart_part,
+};
 use file_storage::domain::authz::TenantOnlyAuthorizer;
 use file_storage::domain::error::DomainError;
+use file_storage::domain::multipart_service::MultipartService;
+use file_storage::domain::ports::MultipartStore;
 use file_storage::domain::service::{FileService, ServiceConfig};
 use file_storage::infra::backend::{BackendRegistry, InMemoryBackend, StorageBackend};
 use file_storage::infra::content::hash;
@@ -83,6 +92,65 @@ async fn build_service() -> (Arc<FileService>, Arc<dyn StorageBackend>, Store) {
         None,
     ));
     (svc, backend, store)
+}
+
+/// Build `FileService` + `MultipartService` sharing one store/backend, using
+/// a caller-supplied `Issuer` (P2 0.1 remaining handler-level tests below
+/// need a *real* signed token — unlike the service-layer tests above, which
+/// hand-build `Claims` and call `finalize_upload_by_token` directly,
+/// bypassing token verification). `svc.verifier()` (mirroring
+/// `handlers::finalize_version`'s own wiring in `routes.rs`) derives from
+/// this same issuer, so a token it mints verifies correctly.
+async fn build_full_service_with_issuer(
+    issuer: Arc<Issuer>,
+) -> (
+    Arc<FileService>,
+    Arc<MultipartService>,
+    Arc<dyn StorageBackend>,
+    Store,
+) {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::new(store.clone()) as Arc<dyn MultipartStore>,
+        backends,
+        authorizer,
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    (svc, msvc, backend, store)
+}
+
+/// Build an `x-fs-token`-only `HeaderMap` (no `x-fs-internal-token`).
+fn headers_with_token(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-fs-token",
+        token.parse().expect("token is a valid header value"),
+    );
+    headers
 }
 
 fn ctx(tenant: Uuid) -> SecurityContext {
@@ -276,6 +344,8 @@ async fn finalize_by_token_without_prior_put_is_rejected() {
         upload: UploadConstraints::default(),
         multipart: MultipartClaims::default(),
         request_id: "test-request-id".to_owned(),
+        content_type: String::new(),
+        etag: String::new(),
     };
 
     let err = svc
@@ -605,4 +675,205 @@ async fn finalize_streams_readback_without_buffering_whole_blob() {
     assert_eq!(version.status, VersionStatus::Available);
     assert_eq!(version.size, true_size);
     assert_eq!(version.hash_value, true_hash);
+}
+
+// -- 11. handlers::finalize_version: internal-secret gate (P2 0.1 remaining) -
+//
+// These exercise the axum handler directly (unlike tests 1-10 above, which
+// call `FileService`/`finalize_upload*` directly), so the interim
+// gear-local shared-secret check added to `handlers::finalize_version` /
+// `handlers::report_multipart_part` is actually on the call path.
+
+#[tokio::test]
+async fn finalize_with_internal_secret_required_rejects_missing_header() {
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let (svc, _msvc, _backend, _store) = build_full_service_with_issuer(Arc::clone(&issuer)).await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let claims = Claims {
+        op: Op::Put,
+        file_id: ticket.file_id,
+        version_id: ticket.version_id,
+        backend_id: "mem".to_owned(),
+        backend_path: backend_path(ticket.file_id, ticket.version_id),
+        exp: time::OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        upload: UploadConstraints::default(),
+        multipart: MultipartClaims::default(),
+        request_id: "test-request-id".to_owned(),
+        content_type: String::new(),
+        etag: String::new(),
+    };
+    let token = issuer
+        .issue(claims, time::OffsetDateTime::now_utc())
+        .expect("issue token");
+
+    let verifier = Arc::new(svc.verifier());
+    let finalize_auth = Arc::new(FinalizeAuth::new(Some("interim-shared-secret".to_owned())));
+    // Deliberately no `x-fs-internal-token` header.
+    let headers = headers_with_token(&token);
+
+    let req = FinalizeUploadReq {
+        size: 5,
+        hash_hex: hex::encode(hash::sha256(b"hello")),
+    };
+
+    let result = finalize_version(
+        Extension(svc),
+        Extension(verifier),
+        Extension(finalize_auth),
+        Path((ticket.file_id, ticket.version_id)),
+        headers,
+        Json(req),
+    )
+    .await;
+
+    // `impl IntoResponse` (the `Ok` side) isn't `Debug`, so `expect_err` can't
+    // be used here — a `let...else` avoids it without matching manually.
+    let Err(err) = result else {
+        panic!("missing internal-token header must be rejected");
+    };
+    assert_eq!(
+        err.status_code(),
+        403,
+        "missing internal credential must map to 403"
+    );
+}
+
+#[tokio::test]
+async fn finalize_with_internal_secret_required_accepts_matching_header() {
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let (svc, _msvc, backend, store) = build_full_service_with_issuer(Arc::clone(&issuer)).await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let known_bytes = Bytes::from_static(b"hello, world!");
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend.put(&path, known_bytes.clone()).await.unwrap();
+
+    let true_size = i64::try_from(known_bytes.len()).unwrap();
+    let true_hash = hash::sha256(&known_bytes);
+
+    let claims = Claims {
+        op: Op::Put,
+        file_id: ticket.file_id,
+        version_id: ticket.version_id,
+        backend_id: "mem".to_owned(),
+        backend_path: path,
+        exp: time::OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        upload: UploadConstraints::default(),
+        multipart: MultipartClaims::default(),
+        request_id: "test-request-id".to_owned(),
+        content_type: String::new(),
+        etag: String::new(),
+    };
+    let token = issuer
+        .issue(claims, time::OffsetDateTime::now_utc())
+        .expect("issue token");
+
+    let verifier = Arc::new(svc.verifier());
+    let secret = "interim-shared-secret";
+    let finalize_auth = Arc::new(FinalizeAuth::new(Some(secret.to_owned())));
+
+    let mut headers = headers_with_token(&token);
+    headers.insert(
+        "x-fs-internal-token",
+        secret.parse().expect("secret is a valid header value"),
+    );
+
+    let req = FinalizeUploadReq {
+        size: true_size,
+        hash_hex: hex::encode(&true_hash),
+    };
+
+    let result = finalize_version(
+        Extension(Arc::clone(&svc)),
+        Extension(verifier),
+        Extension(finalize_auth),
+        Path((ticket.file_id, ticket.version_id)),
+        headers,
+        Json(req),
+    )
+    .await;
+
+    let response = result
+        .expect("matching internal-token header must be accepted")
+        .into_response();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must exist");
+    assert_eq!(
+        version.status,
+        VersionStatus::Available,
+        "finalize must have actually gone through once the internal credential matched"
+    );
+}
+
+#[tokio::test]
+async fn report_part_with_internal_secret_required_rejects_missing_header() {
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let (svc, msvc, _backend, _store) = build_full_service_with_issuer(Arc::clone(&issuer)).await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let upload_id = Uuid::now_v7();
+    let part_number = 1u32;
+    let claims = Claims {
+        op: Op::MultipartPart,
+        file_id: ticket.file_id,
+        version_id: ticket.version_id,
+        backend_id: "mem".to_owned(),
+        backend_path: backend_path(ticket.file_id, ticket.version_id),
+        exp: time::OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        upload: UploadConstraints::default(),
+        multipart: MultipartClaims {
+            upload_id,
+            part_number,
+            offset: 0,
+            size: 5,
+            backend_handle: String::new(),
+        },
+        request_id: "test-request-id".to_owned(),
+        content_type: String::new(),
+        etag: String::new(),
+    };
+    let token = issuer
+        .issue(claims, time::OffsetDateTime::now_utc())
+        .expect("issue token");
+
+    let verifier = Arc::new(svc.verifier());
+    let finalize_auth = Arc::new(FinalizeAuth::new(Some("interim-shared-secret".to_owned())));
+    // Deliberately no `x-fs-internal-token` header.
+    let headers = headers_with_token(&token);
+
+    let req = ReportPartReq {
+        backend_etag: "etag-1".to_owned(),
+        hash_hex: hex::encode(hash::sha256(b"hello")),
+        size: 5,
+    };
+
+    let result = report_multipart_part(
+        Extension(msvc),
+        Extension(verifier),
+        Extension(finalize_auth),
+        Path((ticket.file_id, ticket.version_id, upload_id, part_number)),
+        headers,
+        Json(req),
+    )
+    .await;
+
+    // `impl IntoResponse` (the `Ok` side) isn't `Debug`, so `expect_err` can't
+    // be used here — a `let...else` avoids it without matching manually.
+    let Err(err) = result else {
+        panic!("missing internal-token header must be rejected");
+    };
+    assert_eq!(
+        err.status_code(),
+        403,
+        "missing internal credential must map to 403"
+    );
 }

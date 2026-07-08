@@ -19,8 +19,9 @@ impl CleanupStore for Store {
     async fn list_abandoned_pending_versions(
         &self,
         older_than: OffsetDateTime,
+        now: OffsetDateTime,
     ) -> Result<Vec<FileVersion>, DomainError> {
-        Store::list_abandoned_pending_versions(self, older_than).await
+        Store::list_abandoned_pending_versions(self, older_than, now).await
     }
 
     async fn delete_version(
@@ -242,14 +243,23 @@ impl MultipartStore for Store {
         hash_mode: crate::infra::content::hash_mode::HashMode,
         part_count: Option<i32>,
         manifest: Option<String>,
+        validated_mime: Option<String>,
         audit: crate::domain::audit::AuditEntry,
     ) -> Result<bool, DomainError> {
-        // `mime_type = None`: the multipart-complete path does not perform
-        // MIME validation (out of scope for 1.10 — see `write.rs`'s
-        // `finalize_upload`/`finalize_upload_by_token` for the validated
-        // single-part finalize path), so the declared type is left untouched.
+        // `validated_mime` is the sniffed/canonical type computed by
+        // `complete_multipart_upload` from the assembled object's leading
+        // bytes (P2 remediation item 1.10) — persisted in place of the
+        // client's declared type, mirroring the single-part finalize paths.
         Store::finalize_version(
-            self, file_id, version_id, size, hash_value, hash_mode, part_count, manifest, None,
+            self,
+            file_id,
+            version_id,
+            size,
+            hash_value,
+            hash_mode,
+            part_count,
+            manifest,
+            validated_mime,
             audit,
         )
         .await

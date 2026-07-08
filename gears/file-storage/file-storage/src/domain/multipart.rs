@@ -7,6 +7,7 @@ use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
+use crate::infra::content::hash_mode::HashMode;
 
 /// State of a multipart upload session.
 #[domain_model]
@@ -58,6 +59,85 @@ pub struct MultipartUploadSession {
     pub part_size: u64,
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
+}
+
+/// Result of a successful `complete_multipart_upload` (item 3.3): everything
+/// the ADR-0006 assembly step already computes, returned to the caller
+/// instead of being discarded behind a `204 No Content`.
+///
+/// `manifest` is included so a client can independently re-verify the
+/// composite hash (`docs/features/content-hash-modes.md` §"Client-Side
+/// Manifest Re-Verification") without a second round-trip. At ~90 bytes per
+/// part this is ~1 MiB at the 10k-part ceiling — acceptable for a one-shot
+/// response.
+#[domain_model]
+#[derive(Debug, Clone)]
+pub struct CompletedMultipartUpload {
+    pub version_id: Uuid,
+    pub size: i64,
+    /// Always `"SHA-256"` — the only hash algorithm used by either ADR-0006
+    /// hash mode.
+    pub hash_algorithm: &'static str,
+    /// The ADR-0006 composite root: `sha256(manifest)`.
+    pub content_hash: Vec<u8>,
+    /// Always [`HashMode::MultipartCompositeSha256`] for this completion path.
+    pub hash_mode: HashMode,
+    pub part_count: i32,
+    /// Wire-format manifest text (`Manifest::to_wire_string`).
+    pub manifest: String,
+}
+
+/// Result of `GET /files/{id}/multipart/{upload_id}` (item 3.4): the
+/// session's current state plus the received/missing parts, with fresh
+/// resume URLs for any part not yet uploaded.
+///
+/// `upload_url` on each [`MissingPart`] is only populated while the session
+/// is still `in_progress` and unexpired -- a terminal (`completed`/`aborted`)
+/// or expired session reports state and part accounting only, no resume
+/// URLs (there is nothing left to resume, or the plan's tokens would outlive
+/// the session's own `expires_at` bound).
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[domain_model]
+#[derive(Debug, Clone)]
+pub struct MultipartUploadStatus {
+    pub upload_id: Uuid,
+    pub version_id: Uuid,
+    pub state: MultipartUploadState,
+    pub declared_mime: String,
+    pub declared_size: u64,
+    pub part_size: u64,
+    pub created_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+    /// Parts already reported (via the sidecar's report-part callback), in
+    /// ascending `part_number` order (mirrors `list_multipart_parts`).
+    pub received: Vec<ReceivedPart>,
+    /// Parts not yet reported, in ascending `part_number` order.
+    pub missing: Vec<MissingPart>,
+}
+
+/// One already-uploaded part, as reported by the sidecar.
+#[domain_model]
+#[derive(Debug, Clone)]
+pub struct ReceivedPart {
+    pub part_number: u32,
+    pub size: i64,
+    pub uploaded_at: OffsetDateTime,
+}
+
+/// One part not yet uploaded, with its planned bounds recomputed from the
+/// session's `(declared_size, part_size)` columns and, when resumable, a
+/// freshly-minted signed upload URL.
+#[domain_model]
+#[derive(Debug, Clone)]
+pub struct MissingPart {
+    pub part_number: u32,
+    pub offset: u64,
+    pub size: u64,
+    /// `Some` only for a live, unexpired `in_progress` session; its token
+    /// `exp` is capped at the session's own `expires_at` rather than a fresh
+    /// full TTL, so a resume URL never outlives the session it resumes.
+    pub upload_url: Option<String>,
 }
 
 /// One uploaded part of a multipart session.

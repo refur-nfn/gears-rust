@@ -22,6 +22,14 @@
 //!   - `FS_SIDECAR_FINALIZE_CONNECT_TIMEOUT_SECS` — connect timeout (seconds) for the
 //!     same callbacks (default `5`). Together these bound how long a client's upload
 //!     request can be held open by an unreachable or hung control plane (P2 1.5).
+//!   - `FS_SIDECAR_INTERNAL_TOKEN` — optional interim gear-local shared secret (P2
+//!     0.1 remaining) sent as the `x-fs-internal-token` header on BOTH the finalize
+//!     and report-part control-plane callbacks. Unset/empty = the header is not
+//!     sent, which is exactly what a control plane with
+//!     `FileStorageConfig::finalize_internal_secret` unset expects. Must match the
+//!     control plane's configured secret once it flips
+//!     `require_finalize_internal_secret` on (see the migration-path note in
+//!     `docs/ADR/0003-…-sidecar-data-plane.md`).
 //!   - `FS_SIDECAR_S3_BACKENDS` — P2 1.7.3 config wiring: an optional JSON array of
 //!     `file_storage::config::S3BackendConfig` entries, e.g. a single entry
 //!     `{"id":"s3-primary","endpoint":"http://127.0.0.1:9000","region":"us-east-1",
@@ -92,6 +100,10 @@ struct SidecarState {
     /// Base URL of the control plane, e.g. `http://localhost:8080`.
     /// Empty string = finalize callback disabled (dev/no-control-plane mode).
     control_base_url: String,
+    /// Interim gear-local shared secret (P2 0.1 remaining, `FS_SIDECAR_INTERNAL_TOKEN`)
+    /// sent as `x-fs-internal-token` on the finalize/report-part callbacks. `None` =
+    /// header not sent (matches a control plane with the check disabled).
+    internal_token: Option<String>,
     http: reqwest::Client,
     /// Metrics port (P2 1.8 remediation) — ingress/egress bytes and
     /// route/method/status/latency for the sidecar's own HTTP routes. The
@@ -169,6 +181,18 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("reqwest client: {e}"))?;
 
+    // `FS_SIDECAR_INTERNAL_TOKEN` (P2 0.1 remaining) — attached as
+    // `x-fs-internal-token` on both callbacks below. Unset/empty = not sent.
+    let internal_token = std::env::var("FS_SIDECAR_INTERNAL_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if internal_token.is_some() {
+        tracing::info!(
+            "sidecar configured with FS_SIDECAR_INTERNAL_TOKEN \u{2014} finalize/report-part \
+             callbacks will carry x-fs-internal-token"
+        );
+    }
+
     // `FS_SIDECAR_S3_BACKENDS` (P2 1.7.3 config wiring) — a JSON array of
     // `S3BackendConfig` entries. Parsed and eagerly constructed here (so a
     // misconfigured entry, e.g. a bad endpoint URL or missing credentials
@@ -222,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         backends,
         control_base_url,
+        internal_token,
         http,
         metrics,
     };
@@ -260,9 +285,12 @@ fn build_router(state: SidecarState, max_body_bytes: usize) -> Router {
             put(upload_multipart_part),
         )
         // Liveness probe: always 200 once the process is up and the router is
-        // wired. No backend/dependency check — see module docs for `/readyz`
-        // rationale (skipped for this PR).
+        // wired. No backend/dependency check — see `readyz` below for that.
         .route("/healthz", get(healthz))
+        // Readiness probe (P2 1.6): reflects real backend availability (e.g.
+        // an unmounted local-fs root or an unreachable S3 endpoint) — see
+        // `readyz`'s doc comment.
+        .route("/readyz", get(readyz))
         // P2 1.8 remediation: route-level latency + status. Bound to its own
         // state clone (not the shared router state) via `from_fn_with_state`
         // so it wraps every route above regardless of extractor ordering.
@@ -302,12 +330,53 @@ async fn record_request_metrics(
 
 /// Liveness probe handler. Always returns `200 OK` with a trivial body once
 /// the sidecar process is serving requests. Intentionally does not check
-/// backend health — see the module-level note on `/readyz` (skipped here as
-/// a fast-follow: `SidecarState` only holds `Arc<dyn StorageBackend>`, not a
-/// cheaply-inspectable root path, so a real readiness check would need a new
-/// `StorageBackend` method rather than fitting into this step).
+/// backend health — that is `readyz`'s job.
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Time budget for a single backend's readiness probe. Bounds how long an
+/// unreachable/hung backend (e.g. a stalled S3 endpoint) can delay the whole
+/// `/readyz` response — well under a typical k8s readiness-probe period
+/// (~10s default).
+const READYZ_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Readiness probe handler (P2 1.6). Polls every configured backend's
+/// [`StorageBackend::is_ready`] concurrently, each bounded by
+/// `READYZ_PROBE_TIMEOUT`. Returns `200 "ready"` only when every backend
+/// answers `Ok` within the timeout; otherwise `503`, naming only the failing
+/// backend ids in the body (e.g. `"not ready: s3-primary"`) — never the
+/// underlying error text, so a probe response can never leak backend
+/// internals (transport details, credentials-adjacent error strings, etc.),
+/// matching P2 1.11's no-leak stance for the sidecar's other user-facing
+/// responses.
+async fn readyz(State(state): State<SidecarState>) -> Response {
+    let checks = state.backends.iter().map(|(id, backend)| {
+        let id = id.to_owned();
+        let backend = Arc::clone(backend);
+        async move {
+            match tokio::time::timeout(READYZ_PROBE_TIMEOUT, backend.is_ready()).await {
+                Ok(Ok(())) => None,
+                Ok(Err(_)) | Err(_) => Some(id),
+            }
+        }
+    });
+
+    let failing: Vec<String> = futures::future::join_all(checks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    if failing.is_empty() {
+        (StatusCode::OK, "ready").into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("not ready: {}", failing.join(", ")),
+        )
+            .into_response()
+    }
 }
 
 /// Extract the token from the `fs-token` query param or the `X-FS-Token` header.
@@ -483,11 +552,16 @@ const CALLBACK_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// connect/timeout failure, with `CALLBACK_RETRY_DELAY` between attempts.
 /// Shared by `finalize_with_control_plane` and `report_part_with_control_plane`
 /// so both callbacks get the same bounded-retry behavior (P2 1.5).
+///
+/// `internal_token` (P2 0.1 remaining, `SidecarState::internal_token`) is
+/// attached as `x-fs-internal-token` when present; `None` omits the header
+/// entirely (works against a control plane with the check disabled).
 async fn post_with_retry(
     http: &reqwest::Client,
     url: &str,
     token: &str,
     request_id: &str,
+    internal_token: Option<&str>,
     body_bytes: &[u8],
 ) -> Result<reqwest::Response, reqwest::Error> {
     let mut attempt: u32 = 1;
@@ -501,6 +575,11 @@ async fn post_with_retry(
         // this sidecar's own logs for the same upload.
         if !request_id.is_empty() {
             req = req.header("x-request-id", request_id);
+        }
+        // P2 0.1 remaining: interim shared-secret credential, see the doc
+        // comment above.
+        if let Some(internal_token) = internal_token {
+            req = req.header("x-fs-internal-token", internal_token);
         }
         let result = req.body(body_bytes.to_vec()).send().await;
         match result {
@@ -548,7 +627,16 @@ async fn finalize_with_control_plane(
 
     let body_bytes = finalize_body(size, hash_hex)?;
 
-    match post_with_retry(&state.http, &url, token, request_id, &body_bytes).await {
+    match post_with_retry(
+        &state.http,
+        &url,
+        token,
+        request_id,
+        state.internal_token.as_deref(),
+        &body_bytes,
+    )
+    .await
+    {
         Ok(resp) => interpret_finalize_response(resp, file_id, version_id).await,
         Err(e) => {
             tracing::error!(
@@ -643,7 +731,16 @@ async fn report_part_with_control_plane(
 
     let body_bytes = report_part_body(backend_etag, hash_hex, size)?;
 
-    match post_with_retry(&state.http, &url, token, request_id, &body_bytes).await {
+    match post_with_retry(
+        &state.http,
+        &url,
+        token,
+        request_id,
+        state.internal_token.as_deref(),
+        &body_bytes,
+    )
+    .await
+    {
         Ok(resp) => interpret_report_part_response(resp, upload_id, part_number).await,
         Err(e) => {
             tracing::error!(
@@ -963,16 +1060,40 @@ async fn upload_multipart_part(
     // @cpt-end:cpt-cf-file-storage-flow-multipart-upload-part:p1:inst-part-return
 }
 
-/// Fallback `Content-Type` for every sidecar download response.
+/// Fallback `Content-Type` for a sidecar download response.
 ///
-/// P2 1.11: the sidecar is a stateless byte-mover — the signed-URL `Claims`
-/// it verifies (`infra::signed_url::Claims`) carry no MIME field, and the
-/// version's stored MIME type lives only in the control plane's DB. Threading
-/// the real MIME through requires either a `Claims` schema change or a
-/// control-plane lookup from the sidecar, both out of scope for this step;
-/// flagged as a follow-up to land alongside/after 1.10. A generic
+/// P2 1.11: the control plane now stamps the version's real stored MIME into
+/// the GET token's `content_type` claim at download-URL-issuance time (the
+/// sidecar itself remains a stateless byte-mover with no DB access — it only
+/// echoes what the token carries). This fallback still applies to a token
+/// minted before this field existed (`claims.content_type` empty) or if the
+/// claim's value somehow fails to parse as a header value — a generic
 /// octet-stream type is always a safe (if non-specific) answer.
 const FALLBACK_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// Resolve the `Content-Type` header for a download response from the
+/// token's claims (P2 1.11) — see [`FALLBACK_CONTENT_TYPE`] for when it
+/// falls back instead of echoing `claims.content_type`.
+fn content_type_header(claims: &Claims) -> HeaderValue {
+    if claims.content_type.is_empty() {
+        return HeaderValue::from_static(FALLBACK_CONTENT_TYPE);
+    }
+    HeaderValue::from_str(&claims.content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static(FALLBACK_CONTENT_TYPE))
+}
+
+/// Resolve the `ETag` header for a download response from the token's
+/// claims (P2 1.11). `claims.etag` already carries the quoted, opaque
+/// content `ETag` (`domain::etag::content_etag`) minted by the control plane —
+/// one source of truth, no re-quoting here. `None` when the claim is empty
+/// (a token minted before this field existed) or fails to parse as a header
+/// value, in which case the response simply omits `ETag`.
+fn etag_header(claims: &Claims) -> Option<HeaderValue> {
+    if claims.etag.is_empty() {
+        return None;
+    }
+    HeaderValue::from_str(&claims.etag).ok()
+}
 
 /// Build a `Content-Range` header value, e.g. `bytes 0-99/1000` or
 /// `bytes */1000` (the unsatisfiable-range form, RFC 9110 §14.4).
@@ -988,11 +1109,19 @@ fn header_value(s: &str) -> HeaderValue {
 /// P2 1.11: every backend error is now mapped distinctly instead of folding
 /// blob-not-found, unsatisfiable-range, and genuine I/O failures into a
 /// blanket `416`. `Content-Range` is emitted on every `206` (and on `416`,
-/// per RFC 9110 §14.4) and `Content-Type` is always set — see
-/// `FALLBACK_CONTENT_TYPE` for why it is not (yet) the real stored MIME.
-/// `ETag` is intentionally omitted: the sidecar has no stored content hash
-/// available for a GET token without the same kind of claims/DB-lookup
-/// change noted above (follow-up, coordinate with 1.10).
+/// per RFC 9110 §14.4). `Content-Type` and `ETag` are sourced from the
+/// token's `content_type`/`etag` claims (real stored MIME + content `ETag`,
+/// see [`content_type_header`]/[`etag_header`]), falling back to
+/// [`FALLBACK_CONTENT_TYPE`] and no `ETag` at all for a token minted before
+/// those claims existed.
+///
+/// *Not implemented (optional P2 1.11 stretch, documented rather than
+/// silently skipped)*: `If-None-Match` → `304` on a match. Every download
+/// token is already single-use-scoped to one `(file_id, version_id)`
+/// (re-issuing a new signed URL is the normal client flow whenever content
+/// changes), so the bandwidth win of a conditional download is small; add it
+/// here, mirroring `api/rest/handlers.rs::get_file`'s pattern, if a caller
+/// class needs it.
 async fn download(
     State(state): State<SidecarState>,
     Path((file_id, version_id)): Path<(Uuid, Uuid)>,
@@ -1049,8 +1178,8 @@ async fn download(
         .and_then(range::parse);
 
     match range {
-        Some(r) => download_range(&state, &backend, path, r).await,
-        None => download_whole(&state, &backend, path).await,
+        Some(r) => download_range(&state, &backend, path, r, &claims).await,
+        None => download_whole(&state, &backend, path, &claims).await,
     }
 }
 
@@ -1062,6 +1191,7 @@ async fn download_range(
     backend: &Arc<dyn StorageBackend>,
     path: &str,
     r: file_storage_sdk::ByteRange,
+    claims: &Claims,
 ) -> Response {
     let total = match backend.size(path).await {
         Ok(n) => n,
@@ -1092,10 +1222,10 @@ async fn download_range(
                 header::CONTENT_RANGE,
                 header_value(&format!("bytes {start}-{end}/{total}")),
             );
-            headers_mut.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(FALLBACK_CONTENT_TYPE),
-            );
+            headers_mut.insert(header::CONTENT_TYPE, content_type_header(claims));
+            if let Some(v) = etag_header(claims) {
+                headers_mut.insert(header::ETAG, v);
+            }
             resp
         }
         Err(e) => {
@@ -1115,6 +1245,7 @@ async fn download_whole(
     state: &SidecarState,
     backend: &Arc<dyn StorageBackend>,
     path: &str,
+    claims: &Claims,
 ) -> Response {
     match backend.get(path).await {
         Ok(bytes) => {
@@ -1124,10 +1255,10 @@ async fn download_whole(
             let mut resp = (StatusCode::OK, bytes).into_response();
             let headers_mut = resp.headers_mut();
             headers_mut.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-            headers_mut.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(FALLBACK_CONTENT_TYPE),
-            );
+            headers_mut.insert(header::CONTENT_TYPE, content_type_header(claims));
+            if let Some(v) = etag_header(claims) {
+                headers_mut.insert(header::ETAG, v);
+            }
             resp
         }
         Err(e) => {

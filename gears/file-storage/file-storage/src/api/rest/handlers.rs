@@ -19,13 +19,14 @@ use file_storage_sdk::{CustomMetadataPatch, NewFile, OwnerFilter, OwnerKind};
 
 use super::dto::{
     BindReq, CreateFileReq, CreateRetentionRuleReq, DownloadTicketDto, EffectivePolicyDto, FileDto,
-    FileDtoList, InitiateMultipartReq, MigrateBackendReq, MultipartPartPlanDto, MultipartPlanDto,
-    PolicyDto, RetentionRuleDto, RetentionRuleDtoList, SetPolicyReq, StorageDto, StorageDtoList,
+    FileDtoList, InitiateMultipartReq, MigrateBackendReq, MissingPartDto, MultipartCompleteDto,
+    MultipartPartPlanDto, MultipartPlanDto, MultipartStatusDto, PolicyDto, ReceivedPartDto,
+    RetentionRuleDto, RetentionRuleDtoList, SetPolicyReq, StorageDto, StorageDtoList,
     TransferOwnershipReq, UpdateMetadataReq, UploadTicketDto, VersionDto, VersionDtoList,
 };
 use crate::domain::error::DomainError;
 use crate::domain::etag;
-use crate::domain::multipart::MultipartPlan;
+use crate::domain::multipart::{MultipartPlan, MultipartUploadStatus};
 use crate::domain::multipart_service::MultipartService;
 use crate::domain::policy::{PolicyScope, RetentionScope};
 use crate::domain::policy_service::PolicyService;
@@ -64,6 +65,61 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
         .get(name)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned)
+}
+
+/// Interim gear-local shared-secret credential for the s2s finalize/
+/// report-part callback routes (P2 0.1 remaining — see
+/// `docs/ADR/0003-…-sidecar-data-plane.md`'s trust-model section). This is a
+/// stop-gap until the platform's `toolkit-security::internal_auth` profiles
+/// are deployable in this gear; swap the comparator below for
+/// `InternalAuthenticator` when that lands.
+///
+/// When `secret` is `None` (the default — `FileStorageConfig::finalize_internal_secret`
+/// unset), [`FinalizeAuth::verify`] is a no-op: the signed upload token
+/// (already verified by the caller) remains the sole authorization,
+/// preserving pre-0.1 behavior. When `Some`, callers must additionally
+/// present a matching `x-fs-internal-token` header.
+pub struct FinalizeAuth {
+    secret: Option<String>,
+}
+
+impl FinalizeAuth {
+    #[must_use]
+    pub fn new(secret: Option<String>) -> Self {
+        Self { secret }
+    }
+
+    /// Verify the `x-fs-internal-token` header against the configured
+    /// secret. No-op `Ok(())` when no secret is configured. Comparison is
+    /// constant-time to avoid leaking the secret through response-timing
+    /// side channels.
+    pub fn verify(&self, headers: &HeaderMap) -> Result<(), DomainError> {
+        let Some(expected) = self.secret.as_deref() else {
+            return Ok(());
+        };
+        let provided = headers
+            .get("x-fs-internal-token")
+            .and_then(|v| v.to_str().ok());
+        let matches = provided.is_some_and(|provided| {
+            // `ring::constant_time::verify_slices_are_equal` is ring 0.17's
+            // constant-time byte-slice comparator (this crate already
+            // depends on `ring` via `infra::signed_url`). It lives under a
+            // `#[deprecated]` re-export with no non-deprecated replacement
+            // for a bare secret comparison, so the deprecation warning is
+            // suppressed locally rather than adding a new crate (e.g.
+            // `subtle`) for this one call.
+            #[allow(deprecated)]
+            ring::constant_time::verify_slices_are_equal(expected.as_bytes(), provided.as_bytes())
+                .is_ok()
+        });
+        if matches {
+            Ok(())
+        } else {
+            Err(DomainError::token_invalid(
+                "finalize requires internal credential",
+            ))
+        }
+    }
 }
 
 // ── create + presign ─────────────────────────────────────────────────────────
@@ -447,17 +503,81 @@ pub async fn initiate_multipart(
 
 /// `POST /files/{id}/multipart/{upload_id}/complete` — finalize all parts.
 ///
+/// Returns the bound version's id, size, and ADR-0006 composite hash (item
+/// 3.3) instead of the previous bare `204`. `If-Match` is optional: a
+/// concrete value is checked against the file's current content `ETag`; `*`
+/// (or omission) is unconditional.
+///
 /// @cpt-cf-file-storage-fr-multipart-upload
 pub async fn complete_multipart(
     Extension(ctx): Ctx,
     Extension(svc): MultiSvc,
     Path((file_id, upload_id)): Path<(Uuid, Uuid)>,
-) -> ApiResult<impl IntoResponse> {
-    svc.complete_multipart_upload(&ctx, file_id, upload_id)
+    headers: HeaderMap,
+) -> ApiResult<JsonBody<MultipartCompleteDto>> {
+    let if_match = header_str(&headers, "if-match");
+    let completed = svc
+        .complete_multipart_upload(&ctx, file_id, upload_id, if_match.as_deref())
         .await?;
     // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-return
-    Ok(no_content().into_response())
+    Ok(Json(MultipartCompleteDto {
+        version_id: completed.version_id,
+        size: completed.size,
+        hash_algorithm: completed.hash_algorithm.to_owned(),
+        content_hash: hex::encode(&completed.content_hash),
+        hash_mode: completed.hash_mode.as_str().to_owned(),
+        part_count: completed.part_count,
+        manifest: completed.manifest,
+    }))
     // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-return
+}
+
+fn status_to_dto(s: MultipartUploadStatus) -> MultipartStatusDto {
+    MultipartStatusDto {
+        upload_id: s.upload_id,
+        version_id: s.version_id,
+        state: s.state.as_str().to_owned(),
+        declared_mime: s.declared_mime,
+        declared_size: s.declared_size,
+        part_size: s.part_size,
+        created_at: s.created_at,
+        expires_at: s.expires_at,
+        received: s
+            .received
+            .into_iter()
+            .map(|p| ReceivedPartDto {
+                part_number: p.part_number,
+                size: p.size,
+                uploaded_at: p.uploaded_at,
+            })
+            .collect(),
+        missing: s
+            .missing
+            .into_iter()
+            .map(|p| MissingPartDto {
+                part_number: p.part_number,
+                offset: p.offset,
+                size: p.size,
+                upload_url: p.upload_url,
+            })
+            .collect(),
+    }
+}
+
+/// `GET /files/{id}/multipart/{upload_id}` — introspect a multipart upload
+/// (item 3.4): current state, received parts, and (while resumable) fresh
+/// resume URLs for the missing parts.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+pub async fn introspect_multipart(
+    Extension(ctx): Ctx,
+    Extension(svc): MultiSvc,
+    Path((file_id, upload_id)): Path<(Uuid, Uuid)>,
+) -> ApiResult<JsonBody<MultipartStatusDto>> {
+    let status = svc
+        .introspect_multipart_upload(&ctx, file_id, upload_id)
+        .await?;
+    Ok(Json(status_to_dto(status)))
 }
 
 /// `DELETE /files/{id}/multipart/{upload_id}` — abort a multipart upload.
@@ -540,6 +660,7 @@ pub struct FinalizeUploadReq {
 pub async fn finalize_version(
     Extension(svc): Svc,
     Extension(verifier): Extension<Arc<Verifier>>,
+    Extension(finalize_auth): Extension<Arc<FinalizeAuth>>,
     Path((file_id, version_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
     Json(req): Json<FinalizeUploadReq>,
@@ -562,6 +683,12 @@ pub async fn finalize_version(
         )
         .into());
     }
+
+    // P2 0.1 remaining: interim gear-local shared-secret credential gate —
+    // AFTER token verification, additionally require a matching
+    // `x-fs-internal-token` header when a secret is configured. `None`
+    // (the default) preserves the token-only trust model above.
+    finalize_auth.verify(&headers)?;
 
     // P2 1.8 remediation: log the sidecar-propagated `x-request-id` (echoed
     // from `claims.request_id`, minted at signed-URL issuance) so this
@@ -619,6 +746,7 @@ pub struct ReportPartReq {
 pub async fn report_multipart_part(
     Extension(msvc): MultiSvc,
     Extension(verifier): Extension<Arc<Verifier>>,
+    Extension(finalize_auth): Extension<Arc<FinalizeAuth>>,
     Path((file_id, version_id, upload_id, part_number)): Path<(Uuid, Uuid, Uuid, u32)>,
     headers: HeaderMap,
     Json(req): Json<ReportPartReq>,
@@ -646,6 +774,9 @@ pub async fn report_multipart_part(
             DomainError::token_invalid("token does not authorize reporting this part").into(),
         );
     }
+
+    // P2 0.1 remaining: same interim shared-secret gate as `finalize_version`.
+    finalize_auth.verify(&headers)?;
 
     // P2 1.8 remediation: same correlation-id logging as `finalize_version`.
     let request_id = headers

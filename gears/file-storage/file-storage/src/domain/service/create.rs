@@ -247,6 +247,7 @@ impl FileService {
                 max_size: effective_max,
                 ..UploadConstraints::default()
             },
+            None,
         )?;
         let ticket = UploadTicket {
             file_id,
@@ -381,6 +382,7 @@ impl FileService {
                 max_size: effective_max,
                 ..UploadConstraints::default()
             },
+            None,
         )?;
         Ok(UploadTicket {
             file_id,

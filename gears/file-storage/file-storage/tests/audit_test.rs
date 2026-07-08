@@ -499,7 +499,7 @@ async fn multipart_complete_leaves_audit_rows() {
         .await
         .unwrap();
 
-    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap();
 

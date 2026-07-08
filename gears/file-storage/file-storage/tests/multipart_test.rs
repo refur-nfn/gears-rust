@@ -16,7 +16,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::doc_markdown)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use sea_orm::{ConnectionTrait, Database, Statement};
 use sea_orm_migration::MigratorTrait;
@@ -29,19 +31,22 @@ use file_storage::domain::authz::TenantOnlyAuthorizer;
 use file_storage::domain::data_plane::DataPlaneService;
 use file_storage::domain::error::DomainError;
 use file_storage::domain::idempotency::compute_request_hash;
-use file_storage::domain::multipart::MultipartPlan;
+use file_storage::domain::multipart::{MultipartPlan, MultipartUploadState};
 use file_storage::domain::multipart_service::MultipartService;
 use file_storage::domain::policy::{PolicyBody, PolicyScope, SizeLimits};
 use file_storage::domain::policy_service::PolicyService;
 use file_storage::domain::ports::{DataPlanePort, MultipartStore, PolicyStore};
 use file_storage::domain::service::{FileService, ServiceConfig};
 use file_storage::infra::backend::{
-    BackendRegistry, InMemoryBackend, LocalFsBackend, StorageBackend,
+    BackendCapabilities, BackendRegistry, InMemoryBackend, LocalFsBackend, MultipartCompletionPart,
+    StorageBackend,
 };
+use file_storage::infra::content::hash;
+use file_storage::infra::content::hash_mode::{HashMode, Manifest, ManifestEntry};
 use file_storage::infra::signed_url::Issuer;
 use file_storage::infra::storage::Store;
 use file_storage::infra::storage::migrations::Migrator;
-use file_storage_sdk::{CustomMetadataEntry, NewFile, OwnerKind};
+use file_storage_sdk::{ByteRange, CustomMetadataEntry, NewFile, OwnerKind};
 
 const GTS: &str = "gts.cf.fstorage.file.type.v1~x.test.v1~";
 
@@ -431,7 +436,7 @@ async fn multipart_happy_path_in_memory() {
 
     // Complete: the service assembles the backend blobs and finalizes the
     // version row. Internally calls `backend.complete_multipart(path, handle, parts)`.
-    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap();
 
@@ -531,7 +536,7 @@ async fn multipart_complete_after_already_finalized_is_rejected() {
 
     // First complete: succeeds, finalizes the version, flips the session to
     // `completed`.
-    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap();
 
@@ -539,12 +544,233 @@ async fn multipart_complete_after_already_finalized_is_rejected() {
     // `in_progress`, so this must be rejected before ever touching the
     // version-level CAS.
     let err = msvc
-        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap_err();
     assert!(
         matches!(err, DomainError::MultipartUploadNotInProgress { .. }),
         "expected MultipartUploadNotInProgress, got {err:?}"
+    );
+}
+
+// -- 1c. multipart-complete MIME validation (P2 remediation item 1.10) -------
+
+/// Minimal JPEG signature (`infer` recognizes `image/jpeg` from these leading
+/// bytes) — used as content that does NOT match a declared `image/png`.
+const JPEG_MAGIC: &[u8] = &[
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00,
+];
+
+/// A `complete_multipart_upload` whose declared MIME type (`image/png`) does
+/// not match the assembled object's real leading bytes (a JPEG signature)
+/// must be rejected with `DomainError::MimeMismatch`, mirroring the
+/// single-part `finalize_upload`'s `finalize_rejects_content_not_matching_declared_mime`
+/// (`tests/finalize_test.rs`). Before this fix, `complete_multipart_upload`
+/// never sniffed the assembled bytes at all, so a policy restricting allowed
+/// MIME types could be bypassed by declaring an allowed type at initiate and
+/// multipart-uploading arbitrary content.
+///
+/// @cpt-cf-file-storage-fr-content-type-validation
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn multipart_complete_rejects_content_not_matching_declared_mime() {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+
+    // Declared as `image/png`, but the parts that get uploaded assemble into
+    // a JPEG-signature object -- a policy-bypass attempt.
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let declared_size = JPEG_MAGIC.len() as u64;
+    let plan = msvc
+        .initiate_multipart_upload(&ctx, ticket.file_id, "image/png", declared_size, None, None)
+        .await
+        .unwrap();
+    let session = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+    let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan,
+        &backend_path,
+        &session.backend_upload_handle,
+        1,
+        Bytes::from_static(JPEG_MAGIC),
+    )
+    .await;
+
+    let err = msvc
+        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::MimeMismatch { .. }),
+        "expected MimeMismatch, got {err:?}"
+    );
+
+    // The version must NOT have been finalized: still pending, not available,
+    // and the declared mime is untouched by the rejected complete. The
+    // assembled backend object is now an orphan at `backend_path`, reclaimed
+    // by the orphan-reconciliation sweep -- same recovery story as any other
+    // finalize failure after a successful backend assemble.
+    let version = multipart_store
+        .get_version(ticket.file_id, plan.version_id)
+        .await
+        .unwrap()
+        .expect("version row must still exist");
+    assert_eq!(version.status, file_storage_sdk::VersionStatus::Pending);
+    assert_eq!(version.mime_type, "image/png");
+
+    // The session must also still be `in_progress`: the mismatch is caught
+    // before the session's completed-state transition.
+    let session_after = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must still exist");
+    assert_eq!(session_after.state, MultipartUploadState::InProgress);
+    assert!(
+        !session_after.mime_validated,
+        "mime_validated must stay false when validation failed"
+    );
+}
+
+/// Positive control mirroring `finalize_persists_validated_mime`
+/// (`tests/finalize_test.rs`): content with no recognizable magic-byte
+/// signature (plain text) under a declared `text/plain` completes
+/// successfully, and both the version's persisted `mime_type` and the
+/// session's `mime_validated` flag reflect that the multipart-complete path
+/// now actually performs the validation (P2 remediation item 1.10).
+///
+/// @cpt-cf-file-storage-fr-content-type-validation
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn multipart_complete_persists_validated_mime_and_flag() {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let content = Bytes::from_static(b"Hello, World! This is plain text.");
+    let declared_size = content.len() as u64;
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "text/plain",
+            declared_size,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+    let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan,
+        &backend_path,
+        &session.backend_upload_handle,
+        1,
+        content,
+    )
+    .await;
+
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
+        .await
+        .unwrap();
+
+    // Positive control: unrecognized content is accepted as declared, and the
+    // (unchanged) validated type is persisted on the version row.
+    let version = multipart_store
+        .get_version(ticket.file_id, plan.version_id)
+        .await
+        .unwrap()
+        .expect("version row must exist");
+    assert_eq!(version.status, file_storage_sdk::VersionStatus::Available);
+    assert_eq!(version.mime_type, "text/plain");
+
+    // `mime_validated` is flipped to `true` in the same UPDATE that
+    // transitions the session to `completed`.
+    let session_after = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must still exist");
+    assert!(
+        session_after.mime_validated,
+        "mime_validated must be true after a successful complete"
     );
 }
 
@@ -624,7 +850,7 @@ async fn multipart_full_lifecycle_create_to_delete() {
         Bytes::from_static(b"Hello, World!"),
     )
     .await;
-    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap();
     svc.bind(&ctx, ticket.file_id, plan.version_id, None)
@@ -1437,13 +1663,35 @@ async fn multipart_complete_uses_reported_parts_not_empty_list() {
     // extensions -- exercises `handlers::report_multipart_part` (token
     // verification, path-param binding, JSON decoding) for real, not just
     // the domain method.
+    // P2 0.1 remaining: `report_multipart_part` now also requires a
+    // `FinalizeAuth` extension. `None` reproduces this test's pre-existing
+    // behavior (no internal-secret gate configured, token-only trust model).
+    let finalize_auth = Arc::new(handlers::FinalizeAuth::new(None));
+
     let router = Router::new()
         .route(
             "/api/file-storage/v1/files/{file_id}/versions/{version_id}/multipart/{upload_id}/parts/{part_number}/report",
             post(handlers::report_multipart_part),
         )
         .layer(axum::Extension(Arc::clone(&verifier)))
+        .layer(axum::Extension(finalize_auth))
         .layer(axum::Extension(Arc::clone(&msvc)));
+
+    // The report-part callback only records metadata (etag/hash/size) in the
+    // DB; it never touches the backend. `complete_multipart_upload` (P2
+    // remediation item 1.10) now reads back the assembled object's leading
+    // bytes to sniff its MIME type, so the backend still needs the real
+    // (placeholder) part bytes -- written directly via `backend.upload_part`,
+    // bypassing the sidecar/report-callback dance this test is really about.
+    // Content is arbitrary ASCII filler (`declared_mime` is
+    // `application/octet-stream`, and plain ASCII has no recognizable magic
+    // byte signature, so this never trips a MIME mismatch).
+    let session = store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+    let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
 
     let mut expected_total: i64 = 0;
     for part in &plan.parts {
@@ -1453,6 +1701,18 @@ async fn multipart_complete_uses_reported_parts_not_empty_list() {
 
         let size = i64::try_from(part.size).unwrap();
         expected_total += size;
+
+        backend
+            .upload_part(
+                &backend_path,
+                &session.backend_upload_handle,
+                part.part_number,
+                part.offset,
+                Bytes::from(vec![b'x'; usize::try_from(part.size).unwrap()]),
+            )
+            .await
+            .expect("backend upload_part");
+
         let body = serde_json::json!({
             "backend_etag": format!("etag-{}", part.part_number),
             "hash_hex": hex::encode([u8::try_from(part.part_number % 256).unwrap(); 32]),
@@ -1482,7 +1742,7 @@ async fn multipart_complete_uses_reported_parts_not_empty_list() {
 
     // Complete: must assemble from the REPORTED parts, not a structurally
     // empty list.
-    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
         .await
         .unwrap();
 
@@ -1598,12 +1858,18 @@ async fn report_part_rejects_forged_size() {
     let part = &plan.parts[0];
     let planned_size = i64::try_from(part.size).unwrap();
 
+    // P2 0.1 remaining: `report_multipart_part` now also requires a
+    // `FinalizeAuth` extension. `None` reproduces this test's pre-existing
+    // behavior (no internal-secret gate configured, token-only trust model).
+    let finalize_auth = Arc::new(handlers::FinalizeAuth::new(None));
+
     let router = Router::new()
         .route(
             "/api/file-storage/v1/files/{file_id}/versions/{version_id}/multipart/{upload_id}/parts/{part_number}/report",
             post(handlers::report_multipart_part),
         )
         .layer(axum::Extension(Arc::clone(&verifier)))
+        .layer(axum::Extension(finalize_auth))
         .layer(axum::Extension(Arc::clone(&msvc)));
 
     let token_start =
@@ -1752,4 +2018,953 @@ async fn multipart_initiate_rejected_when_backend_not_multipart_native() {
             );
         }
     }
+}
+
+// ── Item 3.3: richer multipart `complete` contract ──────────────────────────
+
+/// A `StorageBackend` decorator that counts `complete_multipart` invocations
+/// -- used by `complete_with_missing_parts_lists_them` to prove the new
+/// missing-parts rejection (item 3.3) short-circuits `complete_multipart_upload`
+/// **before** ever reaching the backend's native multipart completion, exactly
+/// like the pre-existing residual size-mismatch guard it now sits in front of.
+struct CompleteCallCountingBackend {
+    inner: Arc<dyn StorageBackend>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl CompleteCallCountingBackend {
+    fn new(inner: Arc<dyn StorageBackend>) -> (Arc<Self>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = Arc::new(Self {
+            inner,
+            calls: Arc::clone(&calls),
+        });
+        (backend, calls)
+    }
+}
+
+#[async_trait]
+impl StorageBackend for CompleteCallCountingBackend {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+    async fn put(&self, path: &str, bytes: Bytes) -> Result<(), DomainError> {
+        self.inner.put(path, bytes).await
+    }
+    async fn get(&self, path: &str) -> Result<Bytes, DomainError> {
+        self.inner.get(path).await
+    }
+    async fn get_stream(
+        &self,
+        path: &str,
+    ) -> Result<futures::stream::BoxStream<'_, std::io::Result<Bytes>>, DomainError> {
+        self.inner.get_stream(path).await
+    }
+    async fn get_range(&self, path: &str, range: ByteRange) -> Result<Bytes, DomainError> {
+        self.inner.get_range(path, range).await
+    }
+    async fn delete(&self, path: &str) -> Result<(), DomainError> {
+        self.inner.delete(path).await
+    }
+    async fn exists(&self, path: &str) -> Result<bool, DomainError> {
+        self.inner.exists(path).await
+    }
+    async fn initiate_multipart(&self, path: &str) -> Result<String, DomainError> {
+        self.inner.initiate_multipart(path).await
+    }
+    async fn upload_part(
+        &self,
+        path: &str,
+        upload_handle: &str,
+        part_number: u32,
+        part_offset: u64,
+        data: Bytes,
+    ) -> Result<(String, Vec<u8>), DomainError> {
+        self.inner
+            .upload_part(path, upload_handle, part_number, part_offset, data)
+            .await
+    }
+    async fn complete_multipart(
+        &self,
+        path: &str,
+        upload_handle: &str,
+        parts: &[MultipartCompletionPart],
+    ) -> Result<(Manifest, [u8; 32]), DomainError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .complete_multipart(path, upload_handle, parts)
+            .await
+    }
+    async fn abort_multipart(&self, path: &str, upload_handle: &str) -> Result<(), DomainError> {
+        self.inner.abort_multipart(path, upload_handle).await
+    }
+    async fn list_paths(&self) -> Result<Vec<String>, DomainError> {
+        self.inner.list_paths().await
+    }
+}
+
+/// The happy path of item 3.3: `complete` returns `200` with a rich body
+/// instead of the previous bare `204`. Every field is checked against an
+/// independently recomputed value (not against the service's own output),
+/// mirroring `tests/content_hash_modes_test.rs`'s reference-root approach.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+/// @cpt-dod:cpt-cf-file-storage-dod-multipart-complete:p1
+#[tokio::test]
+async fn complete_returns_version_size_and_composite_hash() {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let content = Bytes::from_static(b"Hello, World!");
+    let declared_size = content.len() as u64;
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            declared_size,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+    let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan,
+        &backend_path,
+        &session.backend_upload_handle,
+        1,
+        content.clone(),
+    )
+    .await;
+
+    let completed = msvc
+        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
+        .await
+        .unwrap();
+
+    // Independently recompute the expected manifest + composite root
+    // (ADR-0006): one entry at offset 0 with sha256(content).
+    let digest = hash::digest_to_array(hash::sha256(&content));
+    let expected_manifest = Manifest::new(vec![ManifestEntry { offset: 0, digest }]).unwrap();
+    let expected_root = expected_manifest.root();
+
+    assert_eq!(completed.version_id, plan.version_id);
+    assert_eq!(completed.size, i64::try_from(declared_size).unwrap());
+    assert_eq!(completed.hash_algorithm, "SHA-256");
+    assert_eq!(completed.content_hash, expected_root.to_vec());
+    assert_eq!(completed.hash_mode, HashMode::MultipartCompositeSha256);
+    assert_eq!(completed.part_count, 1);
+    assert_eq!(completed.manifest, expected_manifest.to_wire_string());
+}
+
+/// A `complete` call whose `If-Match` no longer matches the file's current
+/// content ETag must be rejected with a precondition failure, and must leave
+/// the targeted session untouched (still `in_progress`) -- proving the check
+/// runs before any session/version mutation.
+///
+/// Setup: bind version A (its ETag becomes current), then bind version B
+/// (superseding it -- version A's ETag is now stale/"pre-[most-recent]-bind").
+/// A third, still-in-progress session's `complete` call carrying that stale
+/// ETag must fail.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn complete_with_stale_if_match_is_rejected() {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    // Version A: complete + bind.
+    let plan_a = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            5,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session_a = multipart_store
+        .get_multipart_upload(plan_a.upload_id)
+        .await
+        .unwrap()
+        .expect("session a must exist");
+    let backend_path_a = format!("/{}/{}", ticket.file_id, plan_a.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan_a,
+        &backend_path_a,
+        &session_a.backend_upload_handle,
+        1,
+        Bytes::from_static(b"AAAAA"),
+    )
+    .await;
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan_a.upload_id, None)
+        .await
+        .unwrap();
+    let bound_a = svc
+        .bind(&ctx, ticket.file_id, plan_a.version_id, None)
+        .await
+        .unwrap();
+    let etag_after_bind_a =
+        file_storage::domain::etag::etag_for(&bound_a).expect("etag after first bind");
+
+    // Version B: complete + bind, superseding version A's content pointer --
+    // `etag_after_bind_a` is now stale.
+    let plan_b = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            5,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session_b = multipart_store
+        .get_multipart_upload(plan_b.upload_id)
+        .await
+        .unwrap()
+        .expect("session b must exist");
+    let backend_path_b = format!("/{}/{}", ticket.file_id, plan_b.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan_b,
+        &backend_path_b,
+        &session_b.backend_upload_handle,
+        1,
+        Bytes::from_static(b"BBBBB"),
+    )
+    .await;
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan_b.upload_id, None)
+        .await
+        .unwrap();
+    svc.bind(
+        &ctx,
+        ticket.file_id,
+        plan_b.version_id,
+        Some(&etag_after_bind_a),
+    )
+    .await
+    .unwrap();
+
+    // A third, still-in-progress session -- completing it with the now-stale
+    // (pre-version-B-bind) ETag must be rejected.
+    let plan_c = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            5,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session_c = multipart_store
+        .get_multipart_upload(plan_c.upload_id)
+        .await
+        .unwrap()
+        .expect("session c must exist");
+    let backend_path_c = format!("/{}/{}", ticket.file_id, plan_c.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan_c,
+        &backend_path_c,
+        &session_c.backend_upload_handle,
+        1,
+        Bytes::from_static(b"CCCCC"),
+    )
+    .await;
+
+    let err = msvc
+        .complete_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            plan_c.upload_id,
+            Some(&etag_after_bind_a),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::PreconditionFailed { .. }),
+        "expected PreconditionFailed for a stale If-Match, got {err:?}"
+    );
+
+    let session_c_after = multipart_store
+        .get_multipart_upload(plan_c.upload_id)
+        .await
+        .unwrap()
+        .expect("session c must still exist");
+    assert_eq!(
+        session_c_after.state,
+        MultipartUploadState::InProgress,
+        "a rejected If-Match must not touch the session's state"
+    );
+}
+
+/// `If-Match: *` bypasses the precondition unconditionally, even when the
+/// file already has bound content whose ETag differs from nothing in
+/// particular -- the point is that no comparison happens at all.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn complete_wildcard_if_match_succeeds() {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    // Version A: complete + bind, so the file has real bound content (and
+    // therefore a real, non-`None` current ETag) before the wildcard test.
+    let plan_a = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            5,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session_a = multipart_store
+        .get_multipart_upload(plan_a.upload_id)
+        .await
+        .unwrap()
+        .expect("session a must exist");
+    let backend_path_a = format!("/{}/{}", ticket.file_id, plan_a.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan_a,
+        &backend_path_a,
+        &session_a.backend_upload_handle,
+        1,
+        Bytes::from_static(b"AAAAA"),
+    )
+    .await;
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan_a.upload_id, None)
+        .await
+        .unwrap();
+    svc.bind(&ctx, ticket.file_id, plan_a.version_id, None)
+        .await
+        .unwrap();
+
+    // Version B: `complete` with `If-Match: *` must succeed regardless of the
+    // file's current ETag.
+    let plan_b = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            5,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session_b = multipart_store
+        .get_multipart_upload(plan_b.upload_id)
+        .await
+        .unwrap()
+        .expect("session b must exist");
+    let backend_path_b = format!("/{}/{}", ticket.file_id, plan_b.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan_b,
+        &backend_path_b,
+        &session_b.backend_upload_handle,
+        1,
+        Bytes::from_static(b"BBBBB"),
+    )
+    .await;
+
+    let completed = msvc
+        .complete_multipart_upload(&ctx, ticket.file_id, plan_b.upload_id, Some("*"))
+        .await
+        .expect("If-Match: * must bypass the precondition check");
+    assert_eq!(completed.version_id, plan_b.version_id);
+}
+
+/// `complete` called before every planned part has been reported must fail
+/// with `MultipartPartsMissing` carrying exactly the missing part number(s),
+/// and must never reach the backend's native `complete_multipart` (a
+/// request-counting backend wrapper proves this, mirroring
+/// `tests/content_hash_modes_test.rs`'s `CountingBackend` pattern).
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn complete_with_missing_parts_lists_them() {
+    use file_storage::domain::multipart::DEFAULT_MIN_PART_SIZE;
+
+    let db = build_db().await;
+    let inner: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let (counting, calls) = CompleteCallCountingBackend::new(inner);
+    let backend: Arc<dyn StorageBackend> = counting;
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    // Force a 3-part plan: [min, min, 3] (same trick as the existing
+    // `initiate_returns_coherent_parts_plan` test).
+    let declared_size = 2 * DEFAULT_MIN_PART_SIZE + 3;
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            declared_size,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.parts.len(),
+        3,
+        "declared_size must plan exactly 3 parts"
+    );
+
+    let session = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+    let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
+
+    // Report parts 1 and 3 only -- part 2 is never uploaded/reported.
+    for part in plan.parts.iter().filter(|p| p.part_number != 2) {
+        let data = vec![b'x'; usize::try_from(part.size).unwrap()];
+        simulate_sidecar_put_part(
+            &multipart_store,
+            &backend,
+            &plan,
+            &backend_path,
+            &session.backend_upload_handle,
+            part.part_number,
+            Bytes::from(data),
+        )
+        .await;
+    }
+
+    let err = msvc
+        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id, None)
+        .await
+        .unwrap_err();
+    match err {
+        DomainError::MultipartPartsMissing { upload_id, missing } => {
+            assert_eq!(upload_id, plan.upload_id);
+            assert_eq!(missing, vec![2], "exactly part 2 must be reported missing");
+        }
+        other => panic!("expected MultipartPartsMissing, got {other:?}"),
+    }
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a missing-parts rejection must never reach the backend's complete_multipart"
+    );
+
+    // The session must still be in_progress -- the rejection happens before
+    // any state transition.
+    let session_after = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must still exist");
+    assert_eq!(session_after.state, MultipartUploadState::InProgress);
+}
+
+// ── Item 3.4: introspect / resume ────────────────────────────────────────────
+
+/// The happy path of item 3.4: after reporting only part 1 of a 3-part plan,
+/// `introspect` reports `received == [1]` and `missing == [2, 3]` with the
+/// offsets/sizes matching the original plan, and a fresh `upload_url` for
+/// each still-missing part (the session is still `in_progress` and
+/// unexpired).
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn introspect_reports_received_and_missing_parts() {
+    use file_storage::domain::multipart::DEFAULT_MIN_PART_SIZE;
+
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        Arc::clone(&issuer),
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    // Force a 3-part plan: [min, min, 3] (same trick as
+    // `complete_with_missing_parts_lists_them`).
+    let declared_size = 2 * DEFAULT_MIN_PART_SIZE + 3;
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            declared_size,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.parts.len(),
+        3,
+        "declared_size must plan exactly 3 parts"
+    );
+
+    let session = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+    let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
+
+    // Report only part 1.
+    let part1 = plan.parts.iter().find(|p| p.part_number == 1).unwrap();
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan,
+        &backend_path,
+        &session.backend_upload_handle,
+        1,
+        Bytes::from(vec![b'x'; usize::try_from(part1.size).unwrap()]),
+    )
+    .await;
+
+    let status = msvc
+        .introspect_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .await
+        .unwrap();
+
+    assert_eq!(status.upload_id, plan.upload_id);
+    assert_eq!(status.version_id, plan.version_id);
+    assert_eq!(status.state, MultipartUploadState::InProgress);
+    assert_eq!(status.declared_size, declared_size);
+    assert_eq!(status.part_size, plan.part_size);
+
+    assert_eq!(status.received.len(), 1, "exactly part 1 was reported");
+    assert_eq!(status.received[0].part_number, 1);
+    assert_eq!(status.received[0].size, i64::try_from(part1.size).unwrap());
+
+    assert_eq!(status.missing.len(), 2, "parts 2 and 3 are still missing");
+    let plan_by_number: std::collections::HashMap<u32, _> =
+        plan.parts.iter().map(|p| (p.part_number, p)).collect();
+    for missing in &status.missing {
+        assert!(
+            missing.part_number == 2 || missing.part_number == 3,
+            "unexpected missing part {}",
+            missing.part_number
+        );
+        let planned = plan_by_number
+            .get(&missing.part_number)
+            .expect("missing part must be in the original plan");
+        assert_eq!(missing.offset, planned.offset, "offset must match the plan");
+        assert_eq!(missing.size, planned.size, "size must match the plan");
+        assert!(
+            missing.upload_url.is_some(),
+            "part {} must have a fresh resume upload_url",
+            missing.part_number
+        );
+    }
+}
+
+/// An `introspect` call whose `upload_id` belongs to a different file's
+/// session must be masked as `MultipartUploadNotFound`, exactly like
+/// `complete`/`abort`'s same-shaped guard -- a foreign `upload_id` must not
+/// be distinguishable from a missing one.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn introspect_foreign_upload_id_is_not_found() {
+    let (svc, msvc, _dp) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+
+    let ticket_a = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let ticket_b = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let plan_a = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket_a.file_id,
+            "application/octet-stream",
+            13,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // `plan_a.upload_id` belongs to file A's session; querying it against
+    // file B must be masked as not-found.
+    let err = msvc
+        .introspect_multipart_upload(&ctx, ticket_b.file_id, plan_a.upload_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::MultipartUploadNotFound { .. }),
+        "expected MultipartUploadNotFound for a foreign upload_id, got {err:?}"
+    );
+}
+
+/// A session whose `expires_at` has passed (but whose `state` is still
+/// `in_progress` -- no sweep tick has run) must report its full accounting
+/// with no resume URLs: `introspect` treats "expired" the same way
+/// `complete_multipart_upload`'s defense-in-depth check does, but instead of
+/// rejecting the call outright it simply omits `upload_url` from every
+/// missing part.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn introspect_expired_session_returns_state_without_urls() {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            13,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Backdate expires_at into the past -- no sweep tick runs, so the
+    // session stays `in_progress` in the DB but is no longer resumable.
+    store
+        .set_multipart_expires_at_for_test(
+            plan.upload_id,
+            time::OffsetDateTime::now_utc() - time::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+    let status = msvc
+        .introspect_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .await
+        .unwrap();
+
+    assert_eq!(status.state, MultipartUploadState::InProgress);
+    assert_eq!(
+        status.missing.len(),
+        1,
+        "the single-part plan has exactly one missing part"
+    );
+    for missing in &status.missing {
+        assert!(
+            missing.upload_url.is_none(),
+            "an expired session must not mint a resume URL for part {}",
+            missing.part_number
+        );
+    }
+}
+
+/// A resume `upload_url`'s token `exp` must be capped at the session's own
+/// remaining `expires_at`, never a fresh full TTL -- a resumed upload must
+/// not outlive the session it resumes.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn introspect_resume_urls_expire_with_session() {
+    use file_storage::infra::signed_url::Op;
+
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let verifier = issuer.verifier();
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        Arc::clone(&issuer),
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            13,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+
+    let status = msvc
+        .introspect_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .await
+        .unwrap();
+
+    assert_eq!(status.missing.len(), 1);
+    let missing = &status.missing[0];
+    let upload_url = missing
+        .upload_url
+        .as_deref()
+        .expect("a live session must mint a resume URL");
+
+    let token_start = upload_url.find("fs-token=").expect("fs-token in URL") + "fs-token=".len();
+    let token = &upload_url[token_start..];
+    let now = time::OffsetDateTime::now_utc();
+    let claims = verifier
+        .verify(token, now)
+        .expect("resume token must verify");
+
+    assert_eq!(claims.op, Op::MultipartPart);
+    assert_eq!(claims.file_id, ticket.file_id);
+    assert_eq!(claims.version_id, plan.version_id);
+    assert_eq!(claims.multipart.upload_id, plan.upload_id);
+    assert_eq!(claims.multipart.part_number, missing.part_number);
+    assert_eq!(claims.multipart.offset, missing.offset);
+    assert_eq!(claims.multipart.size, missing.size);
+    assert!(
+        claims.exp <= session.expires_at.unix_timestamp(),
+        "resume token exp ({}) must not exceed the session's own expires_at ({})",
+        claims.exp,
+        session.expires_at.unix_timestamp()
+    );
 }

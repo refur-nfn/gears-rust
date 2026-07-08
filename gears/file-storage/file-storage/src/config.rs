@@ -131,6 +131,29 @@ pub struct FileStorageConfig {
     /// `BackendRegistry::new`'s own validation, never a panic.
     #[serde(default)]
     pub default_backend_id: Option<String>,
+
+    /// Interim gear-local shared secret (P2 0.1 remaining) the s2s
+    /// finalize/report-part callback routes additionally require, on top of
+    /// the signed upload token, via the `x-fs-internal-token` request
+    /// header. `None` (the default) preserves today's token-only trust
+    /// model. This is a stop-gap until the platform's
+    /// `toolkit-security::internal_auth` profiles are deployable in this
+    /// gear — see `docs/ADR/0003-…-sidecar-data-plane.md`'s trust-model
+    /// section — at which point the comparator should be swapped for
+    /// `InternalAuthenticator`. Never printed by `Debug`.
+    #[serde(default)]
+    pub finalize_internal_secret: Option<String>,
+
+    /// When `true`, gear init fails fast if `finalize_internal_secret` is
+    /// absent instead of silently accepting the token-only trust model for
+    /// the finalize/report-part callbacks. Mirrors `require_signing_key_seed`
+    /// (`config.rs`). Defaults to `false` so existing deployments — and any
+    /// sidecar not yet redeployed with `FS_SIDECAR_INTERNAL_TOKEN` — keep
+    /// working; flip to `true` only after every sidecar talking to this
+    /// control plane has been redeployed with the matching env var (see the
+    /// migration-path note in the ADR).
+    #[serde(default)]
+    pub require_finalize_internal_secret: bool,
 }
 
 /// One S3-compatible backend entry (`FileStorageConfig::s3_backends`).
@@ -233,6 +256,16 @@ impl FileStorageConfig {
                  require_signing_key_seed: false to allow an ephemeral per-boot key in dev)"
             );
         }
+        // A missing finalize_internal_secret with the flag set would silently
+        // fall back to the token-only trust model for the s2s finalize/
+        // report-part callbacks — require an explicit opt-out (P2 0.1
+        // remaining).
+        if self.require_finalize_internal_secret && self.finalize_internal_secret.is_none() {
+            anyhow::bail!(
+                "invalid file-storage config: finalize_internal_secret is required (set \
+                 require_finalize_internal_secret: false to allow the token-only trust model)"
+            );
+        }
         Ok(())
     }
 }
@@ -264,6 +297,15 @@ impl fmt::Debug for FileStorageConfig {
             // touches the field itself.
             .field("s3_backends", &self.s3_backends)
             .field("default_backend_id", &self.default_backend_id)
+            // Never print the shared secret — only whether one is configured.
+            .field(
+                "finalize_internal_secret",
+                &self.finalize_internal_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "require_finalize_internal_secret",
+                &self.require_finalize_internal_secret,
+            )
             .finish()
     }
 }
@@ -286,6 +328,8 @@ impl Default for FileStorageConfig {
             enable_in_memory_backend: false,
             s3_backends: Vec::new(),
             default_backend_id: None,
+            finalize_internal_secret: None,
+            require_finalize_internal_secret: false,
         }
     }
 }

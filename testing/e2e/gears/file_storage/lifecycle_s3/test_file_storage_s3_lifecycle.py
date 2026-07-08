@@ -223,7 +223,9 @@ def test_s3_multipart_full_lifecycle(
     complete_resp = client.post(
         f"{API_BASE}/files/{file_id}/multipart/{upload_id}/complete"
     )
-    assert complete_resp.status_code == 204, (
+    # 200 (not the pre-item-3.3 204): the response now carries version_id,
+    # size, and the ADR-0006 composite hash/manifest.
+    assert complete_resp.status_code == 200, (
         f"POST .../multipart/{upload_id}/complete failed: "
         f"{complete_resp.status_code}\n{complete_resp.text}"
     )

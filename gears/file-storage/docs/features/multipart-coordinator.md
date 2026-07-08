@@ -18,6 +18,7 @@ Updated:  2026-07-02 by Constructor Tech
   - [Upload a Part](#upload-a-part)
   - [Complete Multipart Upload](#complete-multipart-upload)
   - [Abort Multipart Upload](#abort-multipart-upload)
+  - [Introspect and Resume Multipart Upload](#introspect-and-resume-multipart-upload)
 - [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [Compute Parts Plan](#compute-parts-plan)
   - [Enforce Per-Part Size Claim at Sidecar](#enforce-per-part-size-claim-at-sidecar)
@@ -150,45 +151,54 @@ User-facing interactions that start with an actor (human or external system) and
 
 **Actor**: `cpt-cf-file-storage-actor-platform-user`
 
-> **Caveat (current, shipped behavior vs. this section's original design).** `complete` takes **no `If-Match`**
-> (any such header is ignored -- no CAS, no `412`); returns **`204 No Content`** with **no response body** (not the
-> `200 {version_id, content_hash, size}` this section originally specified); and does **not** enumerate missing part
-> numbers on a size mismatch -- it only compares `SUM(reported part sizes)` against `declared_size` and returns a
-> generic `409 Conflict` if they differ (a missing part is indistinguishable from a short part in the error). Critically,
-> `complete` **finalizes** the version (`pending -> available`, real assembled size/hash) but does **not bind** it --
+> **Status (P2 remediation item 3.3, shipped).** `complete` now returns **`200`** with a JSON body
+> (`version_id`, `size`, `hash_algorithm`, `content_hash`, `hash_mode`, `part_count`, `manifest`) instead of the
+> earlier bare `204 No Content`. It accepts an **optional** `If-Match` header: a concrete value is checked against
+> the file's current content ETag and a mismatch is rejected (`400` -- `FailedPrecondition` collapses to `400` on
+> this platform, there is no `412`-mapped canonical-error variant); `*` or an absent header is unconditional
+> (backward compatible with the pre-3.3 contract). Before assembling, `complete` also diffs the plan's expected part
+> numbers against the parts actually reported and returns `409` with the missing part numbers if any are absent, in
+> front of the pre-existing generic `SUM(part.size) != declared_size` check. Critically, `complete` still
+> **finalizes** the version (`pending -> available`, real assembled size/hash) but does **not bind** it --
 > `content_id` is untouched, exactly like single-shot upload's finalize/bind split (ADR-0003, DESIGN.md §3.6). The
-> client must issue a separate `POST /files/{id}/bind {version_id}` under `If-Match` afterwards to make the assembled
-> content live. The richer contract below (`If-Match`/`412`, `200` body, `409`-with-missing-parts) is the **intended**
-> design and is tracked as a follow-up (P2 remediation plan, item 3.3, steps 2-4) -- it is not yet implemented and
-> must not be assumed by clients.
+> client must still issue a separate `POST /files/{id}/bind {version_id}` under `If-Match` afterwards to make the
+> assembled content live -- `complete`'s own `If-Match` only guards against the file's content pointer moving out
+> from under a concurrent complete before that later bind, not the bind itself.
 
-`complete` computes the version's content hash by re-reading and re-assembling the object and running SHA-256 over
-it; the per-part digests persisted in `multipart_upload_parts` are not combined into this hash. ADR-0006
-(`cpt-cf-file-storage-adr-content-hash-modes`) describes an offset-manifest composite mode that builds the root hash
-from the per-part digests instead, avoiding the re-read.
+`complete` computes the version's content hash per ADR-0006's **`multipart-composite-sha256`** mode
+(`cpt-cf-file-storage-adr-content-hash-modes`): the backend builds an offset-manifest from the per-part digests
+already persisted in `multipart_upload_parts` (`part_hash`, `offset`) and the root hash is `sha256(manifest)` --
+**no re-read/re-assembly of the object** is performed to compute it. The manifest text is persisted in
+`version_hash_manifest` and returned verbatim in the `complete` response body (`manifest` field) so a client can
+independently re-verify the composite hash (see [content-hash-modes.md](./content-hash-modes.md) §"Client-Side
+Manifest Re-Verification").
 
 **Success Scenarios**:
 - All reported parts are assembled and verified by the backend; the version is **finalized** (`pending -> available`)
-  with the real assembled size/hash; session marked completed. Binding the version as the file's current content is a
-  **separate**, later `POST /files/{id}/bind` call -- `complete` does not bind (see caveat above)
+  with the real assembled size + ADR-0006 composite hash; session marked completed; the response body carries
+  `version_id`/`size`/`hash_algorithm`/`content_hash`/`hash_mode`/`part_count`/`manifest`. Binding the version as the
+  file's current content is a **separate**, later `POST /files/{id}/bind` call -- `complete` does not bind
 
 **Error Scenarios**:
-- Assembled `SUM(part.size)` != `declared_size` -- `409 Conflict` (generic message; **no** missing-part-numbers list -- intended follow-up)
+- One or more planned parts have not been reported yet -- `409 Conflict` with the missing part numbers in the error
+  detail (item 3.3; checked **before** the size-mismatch guard below)
+- Assembled `SUM(part.size)` != `declared_size` (residual guard, e.g. an over-reported part) -- `409 Conflict`
 - Policy size limit exceeded by the assembled total -- policy-size-exceeded error
 - Session not `in_progress` (already completed/aborted, or foreign to this `file_id`) -- `404`-shaped "not found" / conflict
-- `If-Match` is accepted **only** by the separate later `bind` call, not by `complete` itself (see caveat above)
+- `If-Match` supplied and it does not match the file's current content ETag -- `400` (`FailedPrecondition`)
 
 **Steps** (current, shipped behavior):
-1. [x] - `p1` - Client: POST /api/file-storage/v1/files/{id}/multipart/{upload_id}/complete (no request body; `If-Match` is not read) - `inst-complete-request`
-2. [x] - `p1` - Control plane: authorize `write`; load the session by `upload_id`; verify it belongs to `file_id` and is `in_progress` and not expired - `inst-complete-load-session`
+1. [x] - `p1` - Client: POST /api/file-storage/v1/files/{id}/multipart/{upload_id}/complete (no request body; optional `If-Match` header). Control plane: authorize `write`; if `If-Match` is present and not `*`, compare it against the file's current content ETag and reject on mismatch - `inst-complete-request`
+2. [x] - `p1` - Control plane: load the session by `upload_id`; verify it belongs to `file_id` and is `in_progress` and not expired - `inst-complete-load-session`
 3. [x] - `p1` - DB: SELECT all reported rows from multipart_upload_parts WHERE upload_id = ? - `inst-complete-load-parts`
-4. [x] - `p1` - Verify `SUM(part.size) == declared_size`; RETURN 409 (generic, no missing-part-numbers list) if mismatch - `inst-complete-size-verify`
-5. [x] - `p1` - Policy size check against the assembled total - `inst-complete-policy-check`
-6. [x] - `p1` - Backend: `CompleteMultipartUpload`/assemble the parts and compute the SHA-256 of the **actually assembled bytes** (not a combination of the stored per-part hashes) - `inst-complete-assemble`
-7. [x] - `p1` - DB: finalize the version row (`status: pending -> available`, real assembled `size`/`content_hash`); does **not** touch `content_id` - `inst-complete-finalize-version`
-8. [x] - `p1` - DB: UPDATE multipart_uploads SET status=completed WHERE upload_id = ? - `inst-complete-db-session`
-9. [x] - `p1` - RETURN **204 No Content** (no body) - `inst-complete-return`
-10. [ ] - `p2` - Client: separately calls `POST /files/{id}/bind {version_id}` under `If-Match` to swap `content_id` and make the content live - `inst-complete-bind-followup`
+4. [x] - `p1` - Diff the plan's expected part numbers (`ceil(declared_size / part_size)`) against the reported part numbers; RETURN 409 with the missing part numbers if any are absent - `inst-complete-missing-parts`
+5. [x] - `p1` - Verify `SUM(part.size) == declared_size` (residual guard); RETURN 409 (generic) if mismatch - `inst-complete-size-verify`
+6. [x] - `p1` - Policy size check against the assembled total - `inst-complete-policy-check`
+7. [x] - `p1` - Backend: `CompleteMultipartUpload`, building the ADR-0006 offset-manifest and its root hash from the already-persisted per-part digests+offsets -- **no re-read** of the assembled object - `inst-complete-assemble`
+8. [x] - `p1` - DB: finalize the version row (`status: pending -> available`, real assembled `size`/composite `content_hash`/`hash_mode`/`part_count`/`manifest`); does **not** touch `content_id` - `inst-complete-finalize-version`
+9. [x] - `p1` - DB: UPDATE multipart_uploads SET status=completed WHERE upload_id = ? - `inst-complete-db-session`
+10. [x] - `p1` - RETURN **200** `{version_id, size, hash_algorithm, content_hash, hash_mode, part_count, manifest}` - `inst-complete-return`
+11. [ ] - `p2` - Client: separately calls `POST /files/{id}/bind {version_id}` under `If-Match` to swap `content_id` and make the content live - `inst-complete-bind-followup`
 
 ### Abort Multipart Upload
 
@@ -211,6 +221,43 @@ from the per-part digests instead, avoiding the re-read.
 5. [ ] - `p1` - DB: DELETE pending version row from file_versions WHERE version_id = ? AND status = pending - `inst-abort-delete-version`
 6. [ ] - `p1` - DB: UPDATE multipart_uploads SET status=aborted WHERE upload_id = ? - `inst-abort-db-session`
 7. [ ] - `p1` - RETURN 204 No Content - `inst-abort-return`
+
+### Introspect and Resume Multipart Upload
+
+- [x] `p2` - **ID**: `cpt-cf-file-storage-flow-multipart-introspect` (item 3.4, shipped -- SHIP decision)
+
+**Actor**: `cpt-cf-file-storage-actor-platform-user`
+
+**Success Scenarios**:
+- Client receives the session's current state, the parts already reported (`received`), and the parts still missing
+  (`missing`). While the session is still `in_progress` and unexpired, each missing part also carries a freshly
+  minted resume `upload_url` so an interrupted upload can continue without re-initiating; a terminal
+  (`completed`/`aborted`) or expired session reports state/accounting only, with no URLs
+
+**Error Scenarios**:
+- Session not found, or its `upload_id` belongs to a different `file_id` -- `404`-shaped "not found" (masked
+  identically to `complete`/`abort`'s foreign-session guard)
+- Caller lacks `write` permission on the file -- `403`
+
+**Steps**:
+1. [x] - `p1` - Client: GET /api/file-storage/v1/files/{id}/multipart/{upload_id} (no request body) - `inst-introspect-request`
+2. [x] - `p1` - Control plane: authorize `write` on `file_id` (same gate as initiate/complete/abort -- introspect hands
+   out live resume URLs, so it is not opened to a read-capable-but-not-write principal) - `inst-introspect-authz`
+3. [x] - `p1` - DB: SELECT multipart_uploads WHERE upload_id = ?; verify it belongs to `file_id` -- mask a foreign or
+   missing `upload_id` as `404` identically to `complete`'s guard - `inst-introspect-load-session`
+4. [x] - `p1` - DB: SELECT all reported rows from multipart_upload_parts WHERE upload_id = ? - `inst-introspect-load-parts`
+5. [x] - `p1` - Diff the plan's expected part numbers against the reported ones using the same
+   `cpt-cf-file-storage-algo-compute-parts-plan`-derived helper `complete` uses (item 3.3's `missing_part_numbers`) --
+   `inst-introspect-diff`
+6. [x] - `p1` - FOR EACH missing part number: recompute its `(offset, size)` from the session's persisted
+   `(declared_size, part_size)` columns - `inst-introspect-recompute-bounds`
+7. [x] - `p1` - **IF** state == in_progress AND expires_at > now: mint a fresh signed part URL for each missing part,
+   reusing the initiate path's per-part token-minting helper, with the token `exp` capped at the session's own
+   `expires_at` (never a fresh full TTL) - `inst-introspect-mint-urls`
+8. [x] - `p1` - **ELSE** (terminal or expired session): omit `upload_url` from every missing part - `inst-introspect-no-urls`
+9. [x] - `p1` - RETURN 200 {upload_id, version_id, state, declared_mime, declared_size, part_size, created_at,
+   expires_at, received: [{part_number, size, uploaded_at}], missing: [{part_number, offset, size, upload_url?}]} -
+   `inst-introspect-return`
 
 ## 3. Processes / Business Logic (CDSL)
 
@@ -252,19 +299,22 @@ Internal system functions that do not interact with actors directly; called by a
 
 - [ ] `p1` - **ID**: `cpt-cf-file-storage-algo-combine-part-hashes`
 
-**Input**: ordered list of (part_number, part_hash) from multipart_upload_parts; part_hash_algorithm (always SHA-256)
-**Output**: root_hash (hex string)
+**Input**: ordered list of (part_number, offset, part_hash) from multipart_upload_parts; part_hash_algorithm (always SHA-256)
+**Output**: root_hash (hex string), manifest (wire-format text)
 
-There is no explicit "verify no gaps in [1..N]" step -- a missing part is only ever caught indirectly, as a
-`SUM(part.size) != declared_size` mismatch (see [Complete Multipart Upload](#complete-multipart-upload)). The only
-implemented path is `inst-combine-sha256` below: the backend re-reads/re-assembles the object and computes a single
-SHA-256 over it as part of `complete_multipart`, rather than combining the per-part hashes already persisted in
-`multipart_upload_parts`. Those persisted `part_hash` values are written but never read back.
+As of P2 remediation item 3.3, `complete` explicitly diffs the plan's expected part numbers against the reported
+ones and rejects with `409` + the missing part numbers before ever reaching this combination step (see
+[Complete Multipart Upload](#complete-multipart-upload)'s `inst-complete-missing-parts`) -- `inst-combine-sort` below
+is that same gap check, just scoped to this process's own input/output framing. The combination itself is ADR-0006's
+`multipart-composite-sha256` mode (`cpt-cf-file-storage-adr-content-hash-modes`): the backend builds an
+offset-manifest from the already-persisted per-part digests+offsets and computes `root_hash = sha256(manifest)` --
+**no re-read/re-assembly of the object** happens to compute it (superseding this section's original
+re-hash-of-assembled-bytes design, `inst-combine-sha256` below is now the manifest-composite path).
 
 **Steps**:
-1. [ ] - `p2` - Sort parts by part_number ascending; verify no gaps in [1..N] - `inst-combine-sort`
-2. [x] - `p1` - The backend assembles the parts and computes a single SHA-256 hash over the full assembled content as part of `complete_multipart` - `inst-combine-sha256`
-3. [x] - `p1` - RETURN root_hash - `inst-combine-return`
+1. [x] - `p1` - Sort parts by part_number ascending (the repo's `list_parts` returns `ORDER BY part_number`); verify no gaps in [1..N] (item 3.3, `missing_part_numbers`) - `inst-combine-sort`
+2. [x] - `p1` - The backend builds the offset-manifest from the per-part digests+offsets and computes `root_hash = sha256(manifest.to_wire_string())` (ADR-0006 `multipart-composite-sha256`) - `inst-combine-sha256`
+3. [x] - `p1` - RETURN root_hash + manifest text (persisted in `version_hash_manifest`, returned in the `complete` response body) - `inst-combine-return`
 
 ## 4. States (CDSL)
 
@@ -323,20 +373,19 @@ part_number) is idempotent.
 
 - [x] `p1` - **ID**: `cpt-cf-file-storage-dod-multipart-complete`
 
-**Implemented**: `POST /api/file-storage/v1/files/{id}/multipart/{upload_id}/complete` verifies `SUM(reported part
-sizes) == declared_size` (generic `409` on mismatch, no missing-part-numbers list); asks the backend to assemble the
-parts and hash the result; **finalizes** the version (`pending -> available`) with the real size/hash; marks the
-session completed; returns `204 No Content`. It does **not** accept `If-Match` and does **not bind** the version --
-binding is a separate, later client-issued `POST /files/{id}/bind`.
-
-**Deferred (tracked, P2 remediation item 3.3 steps 2-4; not yet implemented -- do not assume)**:
-- [ ] `p2` - `If-Match`/`412` support directly on `complete`
-- [ ] `p2` - a `200 {version_id, content_hash, size}` response instead of `204`
-- [ ] `p2` - an explicit `409` body listing missing part numbers instead of a bare size-mismatch comparison
+**Implemented**: `POST /api/file-storage/v1/files/{id}/multipart/{upload_id}/complete` diffs the plan's expected part
+numbers against the reported ones and rejects with `409` + the missing part numbers if any are absent (item 3.3);
+then verifies `SUM(reported part sizes) == declared_size` as a residual guard (generic `409` on mismatch); asks the
+backend to build the ADR-0006 offset-manifest and compute its composite root hash from the already-persisted
+per-part digests (no re-read of the assembled object); **finalizes** the version (`pending -> available`) with the
+real size + composite hash/mode/part-count/manifest; marks the session completed; returns **`200`** with
+`{version_id, size, hash_algorithm, content_hash, hash_mode, part_count, manifest}`. It accepts an **optional**
+`If-Match` header (a concrete value is checked against the file's current content ETag, `*`/absent is unconditional)
+but does **not bind** the version -- binding is a separate, later client-issued `POST /files/{id}/bind`.
 
 **Implements**:
 - `cpt-cf-file-storage-flow-multipart-complete`
-- `cpt-cf-file-storage-algo-combine-part-hashes` (re-hash-of-assembled-object path, `inst-combine-sha256`, only)
+- `cpt-cf-file-storage-algo-combine-part-hashes` (ADR-0006 manifest-composite path, `inst-combine-sort`/`inst-combine-sha256`/`inst-combine-return`)
 
 **Touches**:
 - API: `POST /api/file-storage/v1/files/{id}/multipart/{upload_id}/complete`
@@ -361,12 +410,23 @@ The system **MUST** implement `DELETE /api/file-storage/v1/files/{id}/multipart/
 
 ### Introspect and Resume Endpoint
 
-- [ ] `p2` - **ID**: `cpt-cf-file-storage-dod-multipart-introspect`
+- [x] `p2` - **ID**: `cpt-cf-file-storage-dod-multipart-introspect`
 
-The system **MUST** implement `GET /api/file-storage/v1/files/{id}/multipart/{upload_id}`: return the original plan (recomputed from declared_size + part_size) and the list of uploaded parts (from multipart_upload_parts); re-issue fresh signed URLs for parts not yet uploaded, enabling resumable multipart sessions after expiry.
+**Shipped (item 3.4, SHIP decision).** `GET /api/file-storage/v1/files/{id}/multipart/{upload_id}` returns the
+session's current state, the parts already reported (from `multipart_upload_parts`), and the parts still missing
+(their `(offset, size)` recomputed from the session's persisted `declared_size`/`part_size` columns via the same
+`missing_part_numbers` helper item 3.3 extracted for `complete`). While the session is still `in_progress` and
+unexpired, each missing part also gets a freshly-minted resume URL, reusing the initiate path's per-part
+token-minting helper -- capped at the session's own remaining `expires_at`, never a fresh full TTL, so a resumed
+upload cannot outlive the session it resumes. A terminal (`completed`/`aborted`) or expired session reports state and
+part accounting only, with no URLs. Authorized on `actions::WRITE` (not `READ`), matching initiate/complete/abort --
+introspect hands out live upload URLs, so it is not opened to a read-capable-but-not-write principal. A foreign or
+missing `upload_id` is masked as `404`, identical to `complete`'s guard.
 
 **Implements**:
+- `cpt-cf-file-storage-flow-multipart-introspect`
 - `cpt-cf-file-storage-flow-multipart-initiate`
+- `cpt-cf-file-storage-algo-compute-parts-plan`
 
 **Touches**:
 - API: `GET /api/file-storage/v1/files/{id}/multipart/{upload_id}`
@@ -394,12 +454,15 @@ The system **MUST** add `version_id uuid NOT NULL`, `declared_size bigint NOT NU
 - [x] The control-plane route `PUT /files/{id}/multipart/{upload_id}/parts/{part_number}` does not exist; all part bytes flow through sidecar signed URLs only (ADR-0003)
 - [x] The sidecar rejects a PUT whose body length does not match the size claim in the token with HTTP 413 before writing any bytes
 - [x] Re-PUT of the same (upload_id, part_number) is idempotent; the part row is overwritten and no duplicate rows are created
-- [x] `POST .../complete` rejects with a generic `409 Conflict` when `SUM(reported part sizes) != declared_size`
-  (a missing part surfaces only as this size mismatch -- **not** an enumerated missing-part-numbers list; that is a
-  tracked follow-up, see the DoD above)
-- [x] `POST .../complete` **finalizes** the file version (`pending -> available`) with the real assembled size/hash
-  and returns `204 No Content` (no body); session status becomes completed. It does **not** bind the version --
-  `content_id` is untouched, and it does **not** accept `If-Match`/`412` (both are tracked follow-ups)
+- [x] `POST .../complete` rejects with `409 Conflict` and the missing part numbers in the error detail when one or
+  more planned parts have not been reported yet (item 3.3); a residual generic `409` still guards
+  `SUM(reported part sizes) != declared_size` for cases the missing-parts diff cannot catch (e.g. an over-reported part)
+- [x] `POST .../complete` **finalizes** the file version (`pending -> available`) with the real assembled size and
+  ADR-0006 composite hash, and returns **`200`** with `{version_id, size, hash_algorithm, content_hash, hash_mode,
+  part_count, manifest}`; session status becomes completed. It does **not** bind the version -- `content_id` is
+  untouched. It accepts an **optional** `If-Match` header (checked against the file's current content ETag; `400`
+  on mismatch, `FailedPrecondition` collapses to `400` on this platform -- there is no `412`-mapped canonical-error
+  variant; `*`/absent is unconditional)
 - [x] `DELETE .../multipart/{upload_id}` marks the session aborted, deletes part rows and the pending version, and aborts the backend handle for multipart_native backends
 - [x] Initiating a multipart upload with declared_size exceeding the effective size-limit policy returns 413; exceeding storage quota returns 507; unsupported MIME returns 415
   (**quota implementation status, P2**: this `[x]` is exercised only by `tests/enforce_test.rs`
@@ -411,8 +474,14 @@ The system **MUST** add `version_id uuid NOT NULL`, `declared_size bigint NOT NU
 - [x] Against the real default topology (`local-fs`, not `multipart_native`), `POST /files/{id}/multipart` is rejected
   (see the caveat in §1.2) -- multipart is only functional against a `multipart_native` backend
   (`InMemoryBackend`, dev/test only)
-- [ ] `POST .../complete` accepts `If-Match` and returns `412` on a stale precondition, directly (not via a separate `bind` call) (p2 follow-up, remediation item 3.3)
-- [ ] `POST .../complete` returns `200 {version_id, content_hash, size}` instead of `204` (p2 follow-up, remediation item 3.3)
-- [ ] `POST .../complete` enumerates missing part numbers in its `409` body instead of a bare size comparison (p2 follow-up, remediation item 3.3)
+- [x] `POST .../complete` accepts `If-Match` and returns `400` (`FailedPrecondition`; this platform has no `412`
+  canonical-error variant) on a stale precondition, directly (not via a separate `bind` call) (P2 remediation item 3.3)
+- [x] `GET /files/{id}/multipart/{upload_id}` (introspect) returns the session state plus `received`/`missing` part
+  lists; missing parts of a still-`in_progress`, unexpired session each carry a fresh resume `upload_url` capped at
+  the session's own `expires_at`; a terminal or expired session omits the URLs; a foreign or missing `upload_id` is
+  masked as `404` (item 3.4, SHIP decision)
+- [x] `POST .../complete` returns `200 {version_id, size, hash_algorithm, content_hash, hash_mode, part_count, manifest}`
+  instead of `204` (P2 remediation item 3.3)
+- [x] `POST .../complete` enumerates missing part numbers in its `409` body instead of a bare size comparison (P2 remediation item 3.3)
 - [ ] Non-native backends write parts as offset-writes into the shared version object instead of per-part objects (p2 follow-up, tied to Tier 1 item 1.7 / a true offset-write `local-fs` implementation)
 - [ ] `GET .../multipart/{upload_id}` returns the plan recomputed from persisted columns and re-issues fresh signed URLs for missing parts (p2 resumability)

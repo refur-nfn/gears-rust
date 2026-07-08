@@ -16,71 +16,12 @@ use crate::domain::etag;
 use crate::domain::policy::PolicyResolver;
 use crate::domain::service::{FileService, VersionRef};
 use crate::infra::backend::StorageBackend;
-use crate::infra::content::{hash, mime};
+use crate::infra::content::hash;
+use crate::infra::content::mime::{
+    MIME_SNIFF_PREFIX_BYTES, enforce_size_ceiling_for_validated_mime, validate_and_resolve_mime,
+};
 use crate::infra::external_clients::UsageDelta;
 use crate::infra::signed_url::{Claims, Op, UploadConstraints};
-
-/// Validate the read-back blob's actual bytes against the version's declared
-/// MIME type, reusing [`mime::validate`]'s magic-byte sniffing (the same logic
-/// the in-process data plane runs at ingress) rather than re-implementing it.
-///
-/// Returns the MIME type that should be persisted: the sniffed/canonical type
-/// when the bytes carry a recognizable signature, otherwise `declared_mime`
-/// unchanged (unrecognized content — e.g. plain text/CSV/custom binary — is
-/// not evidence of a mismatch, so it is accepted as declared).
-///
-/// A version with no declared MIME type (`declared_mime` empty) is passed
-/// through untouched: there is nothing to validate against, and unrestricted
-/// uploads must keep working exactly as before.
-///
-/// @cpt-cf-file-storage-fr-content-type-validation
-fn validate_and_resolve_mime(declared_mime: &str, blob: &[u8]) -> Result<String, DomainError> {
-    if declared_mime.is_empty() {
-        return Ok(declared_mime.to_owned());
-    }
-    mime::validate(declared_mime, blob)?;
-    Ok(mime::detect(blob).map_or_else(|| declared_mime.to_owned(), str::to_owned))
-}
-
-/// Re-enforce the per-MIME size ceiling against the **validated** type. The
-/// declared-type check runs earlier (before the blob is even read back); this
-/// second check closes the gap where a declared type with a generous — or
-/// unrestricted — ceiling would otherwise let bytes of a more tightly
-/// restricted true type slip through under it.
-///
-/// A no-op when `validated_mime` is the same string the earlier check already
-/// used (nothing new to enforce).
-fn enforce_size_ceiling_for_validated_mime(
-    policy: &crate::domain::policy::EffectivePolicy,
-    declared_mime: &str,
-    validated_mime: &str,
-    backend_max_bytes: Option<u64>,
-    actual_size: i64,
-) -> Result<(), DomainError> {
-    if validated_mime == declared_mime {
-        return Ok(());
-    }
-    let effective_max =
-        PolicyResolver::compute_effective_max_bytes(policy, validated_mime, backend_max_bytes);
-    if let Some(limit) = effective_max
-        && actual_size > 0
-        && actual_size.cast_unsigned() > limit
-    {
-        return Err(DomainError::policy_size_exceeded(
-            limit,
-            "policy size limit (true content type)",
-        ));
-    }
-    Ok(())
-}
-
-/// Cap on how many leading bytes of the read-back blob are captured for MIME
-/// sniffing (`cpt-cf-file-storage-fr-content-type-validation`). The vendored
-/// `infer` crate's deepest matcher (a legacy RAR-archive signature) inspects
-/// byte offset 261; every other matcher looks at far fewer bytes. 8 KiB is
-/// comfortably more than any matcher needs, so truncating the read-back to
-/// this prefix can never change a sniff result.
-const MIME_SNIFF_PREFIX_BYTES: usize = 8 * 1024;
 
 /// Read back the blob actually stored at `backend_path` on `backend`,
 /// streaming it chunk by chunk rather than buffering the whole object in
@@ -412,12 +353,16 @@ impl FileService {
 
     /// Issue a signed download URL for a version (shared helper used by
     /// `read_ops.rs`). Visibility is `pub(super)` so only sibling modules use it.
+    ///
+    /// `download_meta` is `Some((content_type, etag))` (P2 1.11) — threaded
+    /// straight through to `sign_url`'s `Op::Get`-only claims population.
     pub(super) fn build_download_url(
         &self,
         file_id: Uuid,
         version_id: Uuid,
         backend_id: String,
         backend_path: String,
+        download_meta: Option<(String, String)>,
     ) -> Result<String, DomainError> {
         self.sign_url(
             Op::Get,
@@ -428,6 +373,7 @@ impl FileService {
                 backend_path,
             },
             UploadConstraints::default(),
+            download_meta,
         )
     }
 

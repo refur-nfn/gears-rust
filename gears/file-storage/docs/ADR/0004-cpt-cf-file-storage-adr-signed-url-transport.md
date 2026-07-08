@@ -165,6 +165,23 @@ a validated module) — which, because the codec is opaque and evolvable, requir
 claim-set, or the rest of this design, only to the provider implementation (and, for the PASETO migration itself, to
 the codec module tracked under Tier 4 item 4.9).
 
+### Claim-set evolution (P2 1.11, 2026-07)
+
+The `Claims` struct (`src/infra/signed_url/mod.rs`) gained two fields since the implementation note above: `content_type`
+and `etag`, both `String`, `#[serde(default, skip_serializing_if = "String::is_empty")]`. They are populated only on a
+download (`op = get`) token — the control plane stamps the version's stored MIME type and its content ETag
+(`domain::etag::content_etag`) into the claims at `download-url` issuance time — so that the sidecar, which has no DB
+access, can emit real `Content-Type`/`ETag` response headers instead of a generic `application/octet-stream` fallback
+with no `ETag` at all. Upload (`op = put`) and multipart-part (`op = multipart_part`) tokens never populate them
+(always the empty string, which the `skip_serializing_if` keeps out of the serialized payload).
+
+This is exactly the kind of claim-set change the Token Opacity Contract below anticipates: it required coordinated
+changes only to the minter (control plane) and verifier (sidecar), no change to any intermediary, and it is
+version-skew-tolerant in both directions by construction — `#[serde(default)]` means a sidecar running this code
+verifies a token minted before this change (falls back exactly as it did before), and a sidecar running the prior
+code simply ignores the two new fields on a token minted after this change (same as the pre-existing `request_id`
+(P2 1.8) and `backend_handle` (P2 1.7) fields, which established this pattern first).
+
 ## Token Opacity Contract
 
 This is a hard interface boundary, not a nicety:

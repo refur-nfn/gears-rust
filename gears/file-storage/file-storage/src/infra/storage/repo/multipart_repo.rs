@@ -92,16 +92,30 @@ impl MultipartRepo {
     /// `new_state` only if the row is currently in `expected_state`. Returns
     /// `true` if a row matched and was updated, `false` on a stale transition
     /// (e.g. a `complete`/`abort` race where another writer already moved it).
+    ///
+    /// `mime_validated`, when `Some`, is set in the **same** UPDATE statement
+    /// (P2 remediation item 1.10) — used by the `in_progress` → `completed`
+    /// transition to flip `mime_validated` to `true` alongside the state
+    /// change, since `complete_multipart_upload` only reaches this call after
+    /// the assembled object's content has already been sniffed and validated
+    /// against the declared MIME type. The `in_progress` → `aborted`
+    /// transition passes `None` — an aborted upload's content was never
+    /// validated.
     pub async fn update_state<C: DBRunner>(
         &self,
         conn: &C,
         upload_id: Uuid,
         expected_state: &str,
         new_state: &str,
+        mime_validated: Option<bool>,
     ) -> Result<bool, DomainError> {
         use sea_orm::sea_query::Expr;
-        let res = UploadEntity::update_many()
-            .col_expr(UploadColumn::State, Expr::value(new_state))
+        let mut update =
+            UploadEntity::update_many().col_expr(UploadColumn::State, Expr::value(new_state));
+        if let Some(validated) = mime_validated {
+            update = update.col_expr(UploadColumn::MimeValidated, Expr::value(validated));
+        }
+        let res = update
             .filter(
                 sea_orm::Condition::all()
                     .add(UploadColumn::UploadId.eq(upload_id))

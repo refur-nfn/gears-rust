@@ -43,7 +43,7 @@ use file_storage::infra::content::hash_mode::{HashMode, Manifest};
 use file_storage::infra::signed_url::Issuer;
 use file_storage::infra::storage::Store;
 use file_storage::infra::storage::migrations::Migrator;
-use file_storage_sdk::{NewFile, OwnerKind};
+use file_storage_sdk::{ByteRange, NewFile, OwnerKind};
 
 const GTS: &str = "gts.cf.fstorage.file.type.v1~x.test.v1~";
 
@@ -87,6 +87,19 @@ impl StorageBackend for CountingBackend {
     ) -> Result<futures::stream::BoxStream<'_, std::io::Result<Bytes>>, DomainError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.get_stream(path).await
+    }
+    // Not counted: a bounded range read is not a "whole-object read" (see the
+    // struct doc comment above) -- unlike `get`/`get_stream`, it never
+    // re-reads the entire assembled object, so it is not what AC2 guards
+    // against. Without this override the trait's *default* `get_range`
+    // (`full = self.get(path).await?`) would dispatch back through this
+    // wrapper's counted `get` and inflate the counter for what is, on every
+    // real backend (`LocalFsBackend`, `S3Backend`), a small native
+    // range-limited fetch. P2 remediation item 1.10 added exactly this call
+    // (a bounded MIME-sniff prefix read) to `complete_multipart_upload`,
+    // after this file's AC2 was written to prove "no whole-object re-read".
+    async fn get_range(&self, path: &str, range: ByteRange) -> Result<Bytes, DomainError> {
+        self.inner.get_range(path, range).await
     }
     async fn delete(&self, path: &str) -> Result<(), DomainError> {
         self.inner.delete(path).await
@@ -300,7 +313,7 @@ async fn complete_multipart_issues_no_object_reread() {
     // Snapshot the whole-object-read counter, complete, and assert the
     // completion step re-read the assembled object ZERO times.
     let before = reads.load(Ordering::SeqCst);
-    msvc.complete_multipart_upload(&ctx, file_id, upload_id)
+    msvc.complete_multipart_upload(&ctx, file_id, upload_id, None)
         .await
         .unwrap();
     let during_complete = reads.load(Ordering::SeqCst) - before;
@@ -339,7 +352,7 @@ async fn client_reverification_succeeds_and_detects_tampering() {
 
     let (file_id, version_id, upload_id, _plan, full) =
         drive_multipart(&svc, &msvc, &store, &backend, &ctx).await;
-    msvc.complete_multipart_upload(&ctx, file_id, upload_id)
+    msvc.complete_multipart_upload(&ctx, file_id, upload_id, None)
         .await
         .unwrap();
 
@@ -411,7 +424,7 @@ async fn migrate_backend_verifies_multipart_composite_without_parts_rows() {
 
     let (file_id, version_id, upload_id, _plan, _full) =
         drive_multipart(&svc, &msvc, &store, &src, &ctx).await;
-    msvc.complete_multipart_upload(&ctx, file_id, upload_id)
+    msvc.complete_multipart_upload(&ctx, file_id, upload_id, None)
         .await
         .unwrap();
 

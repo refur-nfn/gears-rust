@@ -60,17 +60,22 @@ impl Store {
 
     // ── cleanup engine (P2-M4 lifecycle) ─────────────────────────────────────
 
-    /// List all `pending` version rows older than `older_than` (system scope).
+    /// List all `pending` version rows older than `older_than` (system scope),
+    /// excluding versions still backing a live `in_progress` multipart session
+    /// (`expires_at > now`) -- see
+    /// [`VersionRepo::list_pending_older_than`][crate::infra::storage::repo::VersionRepo::list_pending_older_than]
+    /// for the invariant this protects.
     ///
     /// @cpt-cf-file-storage-fr-orphan-reconciliation
     pub async fn list_abandoned_pending_versions(
         &self,
         older_than: OffsetDateTime,
+        now: OffsetDateTime,
     ) -> Result<Vec<FileVersion>, DomainError> {
         let conn = self.db.conn().map_err(db_err)?;
         self.repos
             .versions
-            .list_pending_older_than(&conn, &AccessScope::allow_all(), older_than)
+            .list_pending_older_than(&conn, &AccessScope::allow_all(), older_than, now)
             .await
     }
 

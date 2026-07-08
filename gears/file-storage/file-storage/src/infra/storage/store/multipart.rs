@@ -135,6 +135,13 @@ impl Store {
     /// Mark a multipart upload session as `completed` and record the audit row
     /// in the same transaction.
     ///
+    /// Also flips `mime_validated` to `true` in the same UPDATE (P2
+    /// remediation item 1.10): by the time `MultipartService::complete_multipart_upload`
+    /// calls this, it has already sniffed the assembled object's leading
+    /// bytes and validated them against `session.declared_mime` (bailing out
+    /// with `DomainError::mime_mismatch` before ever reaching this call on a
+    /// mismatch) — so reaching this point means the content is validated.
+    ///
     /// @cpt-cf-file-storage-fr-multipart-upload
     /// @cpt-cf-file-storage-fr-audit-trail
     /// @cpt-cf-file-storage-nfr-audit-completeness
@@ -150,7 +157,7 @@ impl Store {
             .transaction_ref_mapped(move |tx| {
                 Box::pin(async move {
                     let updated = multipart
-                        .update_state(tx, upload_id, "in_progress", "completed")
+                        .update_state(tx, upload_id, "in_progress", "completed", Some(true))
                         .await?;
                     if updated {
                         // @cpt-cf-file-storage-nfr-audit-completeness
@@ -180,7 +187,7 @@ impl Store {
             .transaction_ref_mapped(move |tx| {
                 Box::pin(async move {
                     let updated = multipart
-                        .update_state(tx, upload_id, "in_progress", "aborted")
+                        .update_state(tx, upload_id, "in_progress", "aborted", None)
                         .await?;
                     if updated {
                         // @cpt-cf-file-storage-nfr-audit-completeness

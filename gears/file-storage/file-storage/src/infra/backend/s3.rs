@@ -57,6 +57,13 @@ const SIGN_DURATION: Duration = Duration::from_mins(1);
 /// megabytes of data.
 const DEFAULT_MULTIPART_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Backend path probed by `is_ready` (P2 1.6). Deliberately never written by
+/// any real upload (`file_versions.backend_path` is always
+/// `/{file_id}/{version_id}`, a UUID pair, so this literal can never collide)
+/// — the probe only cares whether the round trip to the endpoint succeeds and
+/// is authenticated, not whether the object exists.
+const READYZ_PROBE_PATH: &str = "/__file_storage_readyz_probe__";
+
 /// An S3-compatible storage backend. Talks to any S3-compatible HTTP API
 /// (real AWS S3, `MinIO`, `s3s-fs` in tests) via path-style addressing.
 pub struct S3Backend {
@@ -759,6 +766,18 @@ impl StorageBackend for S3Backend {
         }
 
         Ok(paths)
+    }
+
+    /// Readiness probe: a `HeadObject` against `READYZ_PROBE_PATH`, a
+    /// well-known key no real upload ever writes. Reuses `exists` rather than
+    /// adding a new S3 API surface: `exists` already treats a clean 404 as
+    /// `Ok(false)` (endpoint reachable, credentials valid, object absent —
+    /// exactly the expected outcome here) and any other status
+    /// (auth failure, 5xx) or transport error as `Err`, so mapping its `Ok`
+    /// case to `()` is sufficient — the probed key's actual presence/absence
+    /// is irrelevant to readiness.
+    async fn is_ready(&self) -> Result<(), DomainError> {
+        self.exists(READYZ_PROBE_PATH).await.map(|_| ())
     }
 }
 

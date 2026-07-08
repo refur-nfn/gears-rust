@@ -126,12 +126,22 @@ impl FileService {
             ));
         }
 
-        let download_url =
-            self.build_download_url(file_id, target, version.backend_id, version.backend_path)?;
+        // P2 1.11: the content ETag is computed once and threaded both into
+        // the GET token's claims (so the sidecar can echo it as a real
+        // `ETag` header with no DB lookup) and into the ticket returned here
+        // — one source of truth (`etag::content_etag`).
+        let content_etag = etag::content_etag(file_id, target);
+        let download_url = self.build_download_url(
+            file_id,
+            target,
+            version.backend_id,
+            version.backend_path,
+            Some((version.mime_type, content_etag.clone())),
+        )?;
         self.metrics.record_operation("download_url", "ok");
         Ok(DownloadTicket {
             download_url,
-            etag: etag::content_etag(file_id, target),
+            etag: content_etag,
             version_id: target,
         })
     }

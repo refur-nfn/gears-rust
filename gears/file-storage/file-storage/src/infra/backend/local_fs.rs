@@ -376,4 +376,18 @@ impl StorageBackend for LocalFsBackend {
 
         Ok(paths)
     }
+
+    /// Readiness probe: confirms `root` exists and is a directory. Catches
+    /// an unmounted volume or a misconfigured root before a real request
+    /// tries to read/write through it. Never touches file content.
+    async fn is_ready(&self) -> Result<(), DomainError> {
+        let meta = tokio::fs::metadata(&self.root)
+            .await
+            .map_err(|e| self.io_err(e))?;
+        if meta.is_dir() {
+            Ok(())
+        } else {
+            Err(DomainError::backend(&self.id, "root is not a directory"))
+        }
+    }
 }

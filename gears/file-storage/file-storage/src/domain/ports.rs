@@ -33,10 +33,18 @@ use crate::domain::policy::{
 /// `Store` implements this trait in `infra/storage/store.rs`.
 #[async_trait]
 pub trait CleanupStore: Send + Sync {
-    /// List pending version rows older than `older_than`.
+    /// List pending version rows older than `older_than`, excluding any
+    /// version still backing a live `in_progress` multipart session
+    /// (`expires_at > now`) -- such a version is never selected, regardless
+    /// of age, so the sweep cannot reclaim it out from under an in-progress
+    /// upload. A session whose `expires_at` has already passed is not
+    /// excluded: it is aborted by the next sweep step
+    /// (`sweep_expired_multipart`) and its version becomes reclaimable on a
+    /// later sweep.
     async fn list_abandoned_pending_versions(
         &self,
         older_than: OffsetDateTime,
+        now: OffsetDateTime,
     ) -> Result<Vec<FileVersion>, DomainError>;
 
     /// Delete a version row + audit in one transaction. Returns `true` if removed.
@@ -224,6 +232,12 @@ pub trait MultipartStore: Send + Sync {
     /// part count, and the offset-manifest row transactionally with the
     /// version-row update. `manifest` is `Some` only for
     /// `multipart-composite-sha256` completions.
+    ///
+    /// `validated_mime` (P2 remediation item 1.10) is the sniffed/canonical
+    /// MIME type to persist in place of the client's declared type, mirroring
+    /// the single-part `Store::finalize_version`'s `mime_type` parameter —
+    /// `complete_multipart_upload` sniffs the assembled object's leading
+    /// bytes before calling this, so it is always `Some` on that path.
     #[allow(clippy::too_many_arguments)]
     async fn finalize_version(
         &self,
@@ -234,6 +248,7 @@ pub trait MultipartStore: Send + Sync {
         hash_mode: crate::infra::content::hash_mode::HashMode,
         part_count: Option<i32>,
         manifest: Option<String>,
+        validated_mime: Option<String>,
         audit: AuditEntry,
     ) -> Result<bool, DomainError>;
 

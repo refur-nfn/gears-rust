@@ -200,6 +200,53 @@ async fn s3_backend_exists_distinguishes_missing_from_error() {
     assert!(backend.exists("now-present").await.unwrap());
 }
 
+/// P2 1.6: `is_ready` against a reachable, correctly-authenticated `s3s-fs`
+/// endpoint must succeed — the probed key is expected to be absent (a clean
+/// 404), which `is_ready` must still treat as "ready".
+#[tokio::test]
+async fn s3_is_ready_ok_against_s3s_fs() {
+    let (addr, dir) = start_s3s_fs().await;
+    let bucket = unique_bucket();
+    let backend = make_backend(addr, &dir, &bucket).await;
+
+    backend
+        .is_ready()
+        .await
+        .expect("is_ready must succeed against a reachable, authenticated endpoint");
+}
+
+/// P2 1.6: `is_ready` against an endpoint nothing listens on must fail
+/// (transport error), not silently report ready.
+#[tokio::test]
+async fn s3_is_ready_err_against_closed_port() {
+    // Bind then immediately drop: reserves an ephemeral port that is
+    // guaranteed closed (nothing listens) for the rest of the test, so the
+    // backend's probe request hits a connection-refused transport error.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("resolve bound local addr");
+    drop(listener);
+
+    let endpoint: url::Url = format!("http://{addr}")
+        .parse()
+        .expect("valid endpoint url");
+    let backend = S3Backend::new(
+        "s3-test",
+        endpoint,
+        "us-east-1",
+        "irrelevant-bucket",
+        TEST_ACCESS_KEY,
+        TEST_SECRET_KEY,
+    )
+    .expect("construct S3Backend");
+
+    backend
+        .is_ready()
+        .await
+        .expect_err("is_ready must fail against an unreachable endpoint");
+}
+
 #[tokio::test]
 async fn s3_backend_list_paths_paginates_across_continuation_token() {
     let (addr, dir) = start_s3s_fs().await;

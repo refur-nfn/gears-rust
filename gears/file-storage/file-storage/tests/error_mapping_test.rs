@@ -21,7 +21,7 @@ use uuid::Uuid;
 /// belt-and-suspenders check alongside the exhaustive match in
 /// `expected_status`: bumping this without adding both a match arm there and
 /// an instance in `all_variant_instances` fails the test below.
-const EXPECTED_VARIANT_COUNT: usize = 23;
+const EXPECTED_VARIANT_COUNT: usize = 24;
 
 /// The expected HTTP status for every `DomainError` variant, per the
 /// canonical-error taxonomy in `libs/toolkit-canonical-errors/src/error.rs`
@@ -52,6 +52,7 @@ fn expected_status(err: &DomainError) -> u16 {
         | DomainError::MultipartUploadNotFound { .. } => 404,
         DomainError::Conflict { .. }
         | DomainError::MultipartUploadNotInProgress { .. }
+        | DomainError::MultipartPartsMissing { .. }
         | DomainError::VersionedFileMigrationNotSupported { .. } => 409,
         DomainError::QuotaExceeded { .. } => 429,
         DomainError::Database { .. } | DomainError::Backend { .. } | DomainError::InternalError => {
@@ -131,6 +132,10 @@ fn all_variant_instances() -> Vec<DomainError> {
         DomainError::MultipartUploadNotInProgress {
             upload_id: Uuid::nil(),
             state: "aborted".into(),
+        },
+        DomainError::MultipartPartsMissing {
+            upload_id: Uuid::nil(),
+            missing: vec![2, 5],
         },
         DomainError::VersionedFileMigrationNotSupported {
             file_id: Uuid::nil(),

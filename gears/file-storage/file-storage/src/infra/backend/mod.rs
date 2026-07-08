@@ -271,6 +271,18 @@ pub trait StorageBackend: Send + Sync {
     async fn list_paths(&self) -> Result<Vec<String>, DomainError> {
         Ok(vec![])
     }
+
+    /// Cheap readiness probe (P2 1.6): confirms the backend can actually
+    /// serve requests right now (e.g. its local-fs root is mounted, its S3
+    /// endpoint is reachable and its credentials are valid), without moving
+    /// any real content. Used by the sidecar's `/readyz` route for k8s
+    /// readiness probing.
+    ///
+    /// The default implementation is always ready — correct for backends
+    /// with no external dependency to probe (e.g. `InMemoryBackend`).
+    async fn is_ready(&self) -> Result<(), DomainError> {
+        Ok(())
+    }
 }
 
 /// Registry of configured backends, with one designated default for new uploads.
@@ -337,6 +349,13 @@ impl BackendRegistry {
             .values()
             .map(|b| (b.id().to_owned(), b.capabilities()))
             .collect()
+    }
+
+    /// Iterate all configured backends as `(id, backend)` pairs. Used by the
+    /// sidecar's `/readyz` probe (P2 1.6), which polls every backend's
+    /// [`StorageBackend::is_ready`] rather than just the default one.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn StorageBackend>)> {
+        self.backends.iter().map(|(id, b)| (id.as_str(), b))
     }
 }
 

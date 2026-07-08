@@ -248,7 +248,7 @@ async fn drive_multipart_upload(
         .await
         .unwrap();
 
-    msvc.complete_multipart_upload(ctx, file_id, plan.upload_id)
+    msvc.complete_multipart_upload(ctx, file_id, plan.upload_id, None)
         .await
         .unwrap();
 
@@ -344,6 +344,8 @@ async fn finalize_by_token_reports_positive_byte_delta() {
         upload: UploadConstraints::default(),
         multipart: MultipartClaims::default(),
         request_id: "test-request-id".to_owned(),
+        content_type: String::new(),
+        etag: String::new(),
     };
     svc.finalize_upload_by_token(&claims, size, digest)
         .await

@@ -144,6 +144,13 @@ impl From<DomainError> for CanonicalError {
                 .with_reason("MULTIPART_NOT_IN_PROGRESS")
                 .create()
             }
+            DomainError::MultipartPartsMissing { upload_id, missing } => {
+                FileResourceError::aborted(format!(
+                    "multipart upload {upload_id}: parts missing: {missing:?}"
+                ))
+                .with_reason("MULTIPART_PARTS_MISSING")
+                .create()
+            }
             DomainError::VersionedFileMigrationNotSupported { file_id } => {
                 FileResourceError::aborted(format!(
                     "File {file_id} has multiple versions and cannot be migrated between backends"

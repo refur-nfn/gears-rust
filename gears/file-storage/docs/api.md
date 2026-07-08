@@ -125,6 +125,17 @@ request header) is the sole authorization; there is no request-time PDP call. Re
 0.1, "option 2") implementation: the client-supplied `size`/`hash_hex` are **not** trusted — the control plane reads
 the blob back from the backend and recomputes both before persisting anything.
 
+**Internal credential (P2 remediation 0.1, remaining half).** The `fs-token` is client-visible (returned in
+plaintext inside `upload_url`), so on its own it does not prove the caller is the sidecar rather than the
+uploading client itself. Both routes below optionally require a second factor: when
+`FileStorageConfig::finalize_internal_secret` is configured, the request must also carry a matching
+`x-fs-internal-token` header (constant-time-compared; `403` on missing/mismatch), checked *after* `fs-token`
+verification. `None` (the default) preserves the token-only behavior above; see
+`docs/ADR/0003-…-sidecar-data-plane.md`'s trust-model section for the mechanism (interim gear-local shared
+secret) and the required rollout order (`FS_SIDECAR_INTERNAL_TOKEN` must reach every sidecar before
+`require_finalize_internal_secret` is flipped `true`). With this second factor configured, the `fs-token`
+remaining client-visible is no longer a way to drive these two routes.
+
 ```text
 D1. POST /files/{file_id}/versions/{version_id}/finalize
     D2. POST /files/{file_id}/versions/{version_id}/multipart/{upload_id}/parts/{part_number}/report
@@ -142,7 +153,8 @@ each part write in the multipart case — see `D2`).
   `mime_type` is also re-validated/resolved from the real bytes (magic-byte sniffing) and persisted, and the version
   is marked `available`.
 - **Response**: `204 No Content`. Errors: `400` (validation/read-back mismatch), `403` (bad/expired/mismatched
-  token), `404` (version not found), `409` (already finalized), `500`.
+  token, **or** missing/mismatched `x-fs-internal-token` when `finalize_internal_secret` is configured — see
+  above), `404` (version not found), `409` (already finalized), `500`.
 - This endpoint does **not** bind the version as current — `POST /files/{id}/bind` remains a separate, explicit
   client call.
 
@@ -153,7 +165,8 @@ deployment.
   `upload_id`/`part_number` must match the path).
 - **Request body** (`application/json`): `{ "backend_etag": "<string>", "hash_hex": "<64-char lowercase hex>", "size": <i64> }`
   — the backend-assigned ETag for this part plus the part's measured SHA-256 and byte length.
-- **Response**: `204 No Content`. Errors: `403`, `404`, `500` (no `400` is declared on this route, even
+- **Response**: `204 No Content`. Errors: `403` (bad/expired/mismatched token, **or** missing/mismatched
+  `x-fs-internal-token` when configured — see above), `404`, `500` (no `400` is declared on this route, even
   though a malformed `hash_hex` is rejected via `DomainError::Validation` — not re-verified whether that surfaces
   differently in practice).
 
@@ -166,20 +179,22 @@ deployment.
 ```text
 P2-1. POST /files/{id}/multipart            initiate (JSON: declared_mime, declared_size, preferred part size, concurrency); returns the parts plan + per-part signed URLs
 P2-2. PUT  <signed part url>                upload one part to the sidecar (raw body)
-P2-3. POST /files/{id}/multipart/{upload_id}/complete   assemble all reported parts into the final object and mark the version `available`
+P2-3. POST /files/{id}/multipart/{upload_id}/complete   assemble all reported parts into the final object, mark the version `available`, and return version/size/composite-hash
 P2-4. DELETE /files/{id}/multipart/{upload_id}          abort; parts discarded
+P2-5. GET /files/{id}/multipart/{upload_id}             introspect/resume; returns state + received/missing parts, with fresh resume URLs for missing parts of a live session
 ```
 
 Notes:
-- `P2-3` (`complete`) takes **no** `If-Match` and does **not** bind the version as current — like the single-part
-  flow, `POST /files/{id}/bind` is a separate, explicit client call. There is also no `400` declared on this route in
-  `routes.rs` (only `401`/`403`/`404`/`409`/`500`).
-- **`GET /files/{id}/multipart/{upload_id}` (list uploaded parts / introspection) does not exist.** An earlier draft
-  of this document listed it; `routes.rs` has no such route. This is
-  [`multipart-coordinator.md`](./features/multipart-coordinator.md)'s only remaining unchecked acceptance-criteria
-  item (a read-only handler joining `multipart_uploads` + `multipart_upload_parts` by `upload_id` to return the plan
-  + received-parts state, for resume). **Not implemented as of this doc pass** — flagged for the team to either fast-
-  follow it or formally re-scope it to P3 (see report for this decision request; do not silently leave it unresolved).
+- `P2-3` (`complete`) does **not** bind the version as current — like the single-part flow, `POST /files/{id}/bind`
+  is a separate, explicit client call. It takes an **optional** `If-Match` header (item 3.3): a concrete value is
+  checked against the file's current content ETag (`400` on mismatch — `FailedPrecondition` collapses to `400` on
+  this platform); `*` or an absent header is unconditional (backward compatible with the pre-3.3 contract). As of
+  item 3.3 the route declares `401`/`403`/`404`/`409`/`400`/`500`.
+- `P2-3` (`complete`) returns **`200`** (not `204` as of item 3.3) with a JSON body — see the response shape below.
+- `P2-5` (`GET .../multipart/{upload_id}`, introspect/resume) is **shipped** (item 3.4, SHIP decision). It is
+  authorized on `write` (like initiate/complete/abort, not `read`) since it hands out live resume upload URLs. A
+  foreign or missing `upload_id` is masked as `404`, identical to `complete`'s guard. The route declares
+  `401`/`403`/`404`/`500`. See the response shape below.
 
 **`P2-1` initiate request body** (`application/json`):
 
@@ -214,6 +229,56 @@ plane via the `D2` report-part callback (see
 [Data-plane callbacks](#data-plane-callbacks-sidecar--control-plane-s2s-token-authenticated)) and persisted in
 `multipart_upload_parts.part_hash`; `complete` assembles from the reported parts.
 
+**`P2-3` complete response** (`application/json`, `200` — item 3.3, replacing the previous bare `204`):
+
+```json
+{
+  "version_id": "uuid",
+  "size": 10485763,
+  "hash_algorithm": "SHA-256",
+  "content_hash": "<64-char lowercase hex — sha256(manifest), ADR-0006 composite root>",
+  "hash_mode": "multipart-composite-sha256",
+  "part_count": 2,
+  "manifest": "v1,0:<64-hex>,8388608:<64-hex>"
+}
+```
+
+Before `complete` assembles anything it now also diffs the plan's expected part numbers (`ceil(declared_size /
+part_size)`) against the parts actually reported; a non-empty diff is rejected with `409` and the missing part
+numbers in the error detail, **before** ever calling the backend's native multipart completion — a caller debugging
+a stalled upload gets an actionable list instead of the opaque total-assembled-size mismatch that was previously the
+only signal. `manifest` lets a client independently re-verify the composite hash (see
+[content-hash-modes.md](./features/content-hash-modes.md) §"Client-Side Manifest Re-Verification") without a second
+round-trip.
+
+**`P2-5` introspect response** (`application/json`, `200` — item 3.4):
+
+```json
+{
+  "upload_id": "uuid",
+  "version_id": "uuid",
+  "state": "in_progress",
+  "declared_mime": "video/mp4",
+  "declared_size": 10485763,
+  "part_size": 8388608,
+  "created_at": "RFC3339",
+  "expires_at": "RFC3339",
+  "received": [
+    { "part_number": 1, "size": 8388608, "uploaded_at": "RFC3339" }
+  ],
+  "missing": [
+    { "part_number": 2, "offset": 8388608, "size": 2097155, "upload_url": "https://sidecar/…?fs-token=…" }
+  ]
+}
+```
+
+`received` lists parts already reported (via the sidecar's report-part callback); `missing` lists the rest, with
+their `(offset, size)` recomputed from the session's persisted `declared_size`/`part_size` columns. `upload_url` on a
+`missing` entry is present only while the session is still `in_progress` and unexpired — its token `exp` is capped at
+the session's own `expires_at`, never a fresh full TTL, so a resumed upload cannot outlive the session it resumes. A
+terminal (`completed`/`aborted`) or expired session still returns `state` and the `received`/`missing` accounting,
+but every `missing` entry omits `upload_url`.
+
 Full request/response envelopes, error taxonomy, token claims, persistence, and resumability are specified in the
 FEATURE artifact **[features/multipart-coordinator.md](./features/multipart-coordinator.md)**.
 
@@ -224,7 +289,8 @@ FEATURE artifact **[features/multipart-coordinator.md](./features/multipart-coor
 > plan can be reconstituted for resume. The interim client-driven control-plane byte route (`PUT .../parts/{n}`) has
 > been **removed** — bytes flow exclusively to the sidecar (ADR-0003, FEATURE §8 migration). The complete-time
 > total-size check (assembled size == `declared_size`) remains as the defence-in-depth backstop. Per-part hashes are
-> **SHA-256** in P2.
+> **SHA-256** in P2. The introspect/resume endpoint (`P2-5`, item 3.4) is also **shipped**: it reconstitutes the
+> plan's missing parts from the session's persisted columns and re-mints their signed URLs for a live session.
 
 ## P2 — Policy engine
 
@@ -363,6 +429,8 @@ avoid leaving this unswept sibling behind.
   | `expected_hash` = `<alg>:<hex>` | no | P1 | upload | `400`² |
   | `max_rate` | no | P2 | up/down | throttle |
   | `max_conns` | no | P2 | up/down | `429` |
+  | `content_type` | no | P2 (1.11) | download (`op = get`) | n/a — echoed as `Content-Type`³ |
+  | `etag` | no | P2 (1.11) | download (`op = get`) | n/a — echoed as `ETag`³ |
 
   ¹ `exact_size` is checked only after the stream fully drains (mismatch → `400`, "size does not match exact_size");
   it can never itself trigger `413` (that's `max_size`'s mid-stream abort, and the two claims are documented as
@@ -371,7 +439,13 @@ avoid leaving this unswept sibling behind.
   token as of this doc pass, so this claim/status pairing may be dead code; flagged for the team, not
   fixed here (out of scope for this doc pass).<br>
   ² previously documented as `422`; `bin/sidecar.rs`'s `expected_hash` check returns `(StatusCode::BAD_REQUEST, ...)`
-  (`400`), not `422` — no `422` response exists anywhere in this gear.
+  (`400`), not `422` — no `422` response exists anywhere in this gear.<br>
+  ³ these two claims are populated only on a **download** (`op = get`) token, at `download-url` issuance time — the
+  control plane reads `version.mime_type` and computes the content ETag (`domain::etag::content_etag`) once and
+  stamps both into the claims, so the sidecar (no DB access) can emit the real `Content-Type`/`ETag` response
+  headers instead of a generic `application/octet-stream` fallback with no `ETag` at all. `#[serde(default)]` keeps
+  verification tolerant of a token minted before these fields existed — such a token still falls back exactly as
+  before. Never populated on upload (`op = put`) or multipart-part (`op = multipart_part`) tokens.
 - **`exp` is mandatory, short by default, and hard-capped.** Every issued URL gets a **short default TTL**
   (`default_url_ttl`, minutes — 15 min in P1) to bound the stale-permission window, and the control plane refuses to
   mint beyond a **hard ceiling** `max_url_ttl` (≤ **7 days**). Both are enforced at signing; the sidecar only checks
@@ -445,6 +519,14 @@ X-FS-Created-At: <ISO 8601>
 X-FS-Meta-<key>: <value>                               # one header per custom metadata key
 ```
 
+`ETag` and `Content-Type` are, as of P2 1.11, genuinely sourced per-request from the download token's
+`etag`/`content_type` claims (see the Claims table above) rather than a control-plane round trip — the sidecar has
+no DB access, so the token is its only source for either. A token minted before P2 1.11 (or, in principle, any
+other producer that leaves either claim empty) falls back to `Content-Type: application/octet-stream` and omits
+`ETag` entirely, rather than sending an empty header. The sidecar `GET` path does not itself implement
+`If-None-Match` → `304` (the row above lists it as an intended, not yet built, capability — tracked alongside `HEAD`,
+which the sidecar also does not yet route); this is a pre-existing gap, not something P2 1.11 introduced or closes.
+
 ## Status code summary
 
 - `200 OK` — successful control read, metadata `PATCH` with change, bind, presign, or sidecar full download.
@@ -457,8 +539,9 @@ X-FS-Meta-<key>: <value>                               # one header per custom m
   length is short (sidecar, `PUT`); a content hash mismatch against the `expected_hash` claim (sidecar, `PUT`); a
   malformed token minted at presign (e.g. both `max_size` and `exact_size` claims); the declared file size exceeds
   the effective policy size limit (control plane, `create_file`/`presign_version`/multipart `initiate`); an
-  `If-Match`/`If-Match-Metadata` precondition mismatch on control-plane `bind`/`DELETE`/`PATCH` (`FailedPrecondition`
-  collapses to `400` on this platform — there is no `412`-mapped canonical-error variant); the finalize callback's
+  `If-Match`/`If-Match-Metadata` precondition mismatch on control-plane `bind`/`DELETE`/`PATCH`/multipart `complete`
+  (item 3.3; `FailedPrecondition` collapses to `400` on this platform — there is no `412`-mapped canonical-error
+  variant); the finalize callback's
   read-back size/hash/mime not matching the sidecar's claim, or no blob present at the version's backend path at all
   (control plane, `POST .../finalize` — see
   [Data-plane callbacks](#data-plane-callbacks-sidecar--control-plane-s2s-token-authenticated)); or invalid GTS file
@@ -473,8 +556,10 @@ X-FS-Meta-<key>: <value>                               # one header per custom m
     (bind another version first).
   - `migrate` (`POST /files/{id}/migrate`): the version is not yet finalized, or a concurrent migration to a
     different target already won the race.
-  - multipart `complete`/`abort`: the session is not `in_progress` (e.g. completing an already-aborted upload), the
-    assembled size does not match `declared_size`, or the pending version row was removed concurrently.
+  - multipart `complete`/`abort`: the session is not `in_progress` (e.g. completing an already-aborted upload), one
+    or more planned parts have not been reported yet (item 3.3 — `MultipartPartsMissing`, error detail lists the
+    missing part numbers, checked **before** the size check below), the assembled size does not match
+    `declared_size`, or the pending version row was removed concurrently.
   - `create_file` (idempotent retry): the same `idempotency_key` was reused with a materially different request body.
   - `download_url` (`GET /files/{id}/download-url`): the file has no bound content yet (never bound), or the target
     version's upload has not been finalized. **Not declared** in this route's OpenAPI registration in `routes.rs`

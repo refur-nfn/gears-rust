@@ -119,6 +119,25 @@ pub struct Claims {
     /// verification tolerant of a token minted before this field existed.
     #[serde(default)]
     pub request_id: String,
+    /// Stored MIME of the version (`op = get` tokens only; P2 1.11).
+    ///
+    /// The sidecar has no DB access, so this is the only way it can emit a
+    /// real `Content-Type` on a download response instead of a generic
+    /// `application/octet-stream` fallback. `#[serde(default)]` keeps
+    /// verification tolerant of tokens minted before this field existed
+    /// (old sidecars ignore the new field; new sidecars tolerate old tokens
+    /// by falling back).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_type: String,
+    /// Opaque content `ETag` of the (file, version) pair (`op = get` tokens
+    /// only; P2 1.11), the same value returned in `DownloadTicket::etag` —
+    /// one source of truth (`domain::etag::content_etag`).
+    ///
+    /// Lets the sidecar emit a real `ETag` header without a DB lookup.
+    /// `#[serde(default)]` keeps verification tolerant of tokens minted
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub etag: String,
 }
 
 fn is_default_constraints(c: &UploadConstraints) -> bool {

@@ -167,16 +167,29 @@ impl FileService {
         self.issuer.verifier()
     }
 
+    /// Mint a signed URL for `op` against `v`.
+    ///
+    /// `download_meta` is `Some((content_type, etag))` for `Op::Get` tokens
+    /// only (P2 1.11) — the version's stored MIME and content ETag, so the
+    /// sidecar can emit real `Content-Type`/`ETag` response headers without a
+    /// DB lookup. It is silently ignored (never populated in the claims) for
+    /// any other `op`; non-GET call sites pass `None`.
     pub(super) fn sign_url(
         &self,
         op: Op,
         v: &VersionRef,
         constraints: UploadConstraints,
+        download_meta: Option<(String, String)>,
     ) -> Result<String, DomainError> {
         // P2 2.13: resolve (and validate) the path segment before doing any
         // signing work, so a rejected `op` never wastes a token mint.
         let verb = content_verb(op)?;
         let now = OffsetDateTime::now_utc();
+        // P2 1.11: only a GET (download) token ever carries content_type/etag.
+        let (content_type, etag) = match op {
+            Op::Get => download_meta.unwrap_or_default(),
+            Op::Put | Op::MultipartPart => (String::new(), String::new()),
+        };
         // P2 1.8: mint a fresh correlation id per signed URL. The sidecar
         // echoes it back as `x-request-id` on its finalize callback so both
         // planes' logs can be joined on the same id.
@@ -190,6 +203,8 @@ impl FileService {
             upload: constraints,
             multipart: MultipartClaims::default(),
             request_id: Uuid::now_v7().to_string(),
+            content_type,
+            etag,
         };
         let token = self.issuer.issue(claims, now)?;
         Ok(format!(

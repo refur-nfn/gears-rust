@@ -122,7 +122,9 @@ impl CleanupEngine {
     /// Sweep order (each step is best-effort -- one failure does not abort the
     /// rest):
     /// 1. Abandoned pending versions (pre-registered but never finalised, past
-    ///    the orphan grace window).
+    ///    the orphan grace window) -- **except** a version still backing a
+    ///    live `in_progress` multipart session (`expires_at > now`), which is
+    ///    never selected regardless of age (P2 remediation 2.8).
     /// 2. Expired multipart sessions (`expires_at < now`, still `in_progress`).
     /// 3. Retention-policy expiry (age / inactivity / metadata rules, all scopes).
     /// 4. Expired idempotency-key rows (`expires_at <= now`). `audit_outbox`/
@@ -146,7 +148,8 @@ impl CleanupEngine {
 
         // Step 1 -- abandoned pending versions (+ the parent `files` row, if
         // reclaiming the version leaves it a permanent zero-version orphan).
-        let (pending_deleted, files_deleted) = self.sweep_abandoned_pending(grace_cutoff).await;
+        let (pending_deleted, files_deleted) =
+            self.sweep_abandoned_pending(grace_cutoff, now).await;
         result.abandoned_pending_deleted += pending_deleted;
         result.abandoned_files_deleted += files_deleted;
 
@@ -178,11 +181,23 @@ impl CleanupEngine {
     /// Delete pending version rows that were never finalised and are older than
     /// `grace_cutoff`. Blob bytes are cleaned up on a best-effort basis.
     ///
+    /// Invariant: a pending version referenced by a live `in_progress`
+    /// multipart session (`expires_at > now`) is never selected here,
+    /// regardless of age -- see
+    /// [`crate::domain::ports::CleanupStore::list_abandoned_pending_versions`].
+    /// This is why `now` is threaded through alongside `grace_cutoff`: the
+    /// guard must use the *same* "now" the caller used to decide the session
+    /// is still live, not a value re-sampled inside the query layer.
+    ///
     /// Returns `(pending_versions_deleted, orphan_files_deleted)`.
-    async fn sweep_abandoned_pending(&self, grace_cutoff: OffsetDateTime) -> (usize, usize) {
+    async fn sweep_abandoned_pending(
+        &self,
+        grace_cutoff: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> (usize, usize) {
         let versions = match self
             .store
-            .list_abandoned_pending_versions(grace_cutoff)
+            .list_abandoned_pending_versions(grace_cutoff, now)
             .await
         {
             Ok(v) => v,

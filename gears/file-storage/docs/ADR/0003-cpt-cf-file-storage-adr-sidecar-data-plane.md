@@ -153,6 +153,33 @@ platform auth module's token revocation, not the URL layer.
   delegated identity (see the Implementation note above). The sidecar never performs the `bind`
   (version) write itself; that remains a client-issued, user-authorized control-plane request
   (`cpt-cf-file-storage-fr-authorization`).
+* **Trust model update (P2 remediation 0.1, remaining half).** The `fs-token` alone is
+  client-visible: it is handed back to the client in plaintext inside `upload_url` (minted by
+  `sign_url`), so a client could always call `finalize`/`report-part` itself at a time of its
+  choosing, replay reports, or otherwise occupy the trust position the callback was designed for the
+  sidecar alone. The data-integrity half of this was already closed independently (the control plane
+  re-derives `size`/`hash`/`mime_type` from a real streaming read-back — see
+  `domain/service/write.rs::read_back_and_hash_streaming` — so a forged claim cannot corrupt stored
+  metadata). What remained was *who* is allowed to call these two routes at all. The chosen
+  mechanism is an **interim gear-local shared secret** (not the platform's
+  `toolkit-security::internal_auth` profiles, which are not yet deployable in this gear — Profile 1
+  is in-process-only trust, useless across the sidecar/control-plane process boundary; Profile 2
+  (`BootstrapToken`) is struct-only with validation deferred; Profile 3 needs K8s `TokenReview`
+  wiring this gear doesn't have): `FileStorageConfig::finalize_internal_secret` (optional) plus
+  `require_finalize_internal_secret` (fail-fast startup guard, mirroring `require_signing_key_seed`).
+  When configured, `finalize`/`report-part` additionally require a `x-fs-internal-token` header
+  matching the configured secret (constant-time comparison via `ring::constant_time`,
+  `handlers::FinalizeAuth`), checked *after* `fs-token` verification; a missing/mismatched header is
+  a `403`. The sidecar sends this header (from `FS_SIDECAR_INTERNAL_TOKEN`) on both callbacks when
+  configured; unset on either side preserves pre-0.1 behavior (token-only trust), so **the rollout
+  order matters**: (1) deploy the control plane with the secret configured but
+  `require_finalize_internal_secret: false` (accepts calls with or without the header); (2) redeploy
+  every sidecar talking to it with the matching `FS_SIDECAR_INTERNAL_TOKEN`; (3) only then flip
+  `require_finalize_internal_secret: true` (rejects any caller lacking the header, closing the
+  client-driven-finalize gap). Flipping step 3 before step 2 completes bricks uploads from any
+  not-yet-redeployed sidecar. This is explicitly a stop-gap: once the platform's `internal_auth`
+  profiles are deployable here, `handlers::FinalizeAuth`'s comparator should be swapped for
+  `InternalAuthenticator` and this shared secret retired.
 * A new signed-URL contract (`cpt-cf-file-storage-fr-signed-urls`) and the constraint model become
   part of the public surface; the response-header set the sidecar must echo verbatim is baked into
   the signed URL.

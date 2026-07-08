@@ -1,6 +1,6 @@
 //! Repository for the `file_versions` table (immutable content versions).
 
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Expr, Query};
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 use time::OffsetDateTime;
 use toolkit_db::secure::{
@@ -14,6 +14,9 @@ use file_storage_sdk::{FileVersion, VersionStatus};
 use crate::domain::error::DomainError;
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::file_version::{ActiveModel, Column, Entity};
+use crate::infra::storage::entity::multipart_upload::{
+    Column as MultipartUploadColumn, Entity as MultipartUploadEntity,
+};
 use crate::infra::storage::entity::version_hash_manifest::{
     ActiveModel as ManifestActiveModel, Column as ManifestColumn, Entity as ManifestEntity,
 };
@@ -353,7 +356,18 @@ impl VersionRepo {
     }
 
     /// List all `pending` version rows whose `created_at` is older than
-    /// `older_than`. Used by the orphan-reconciliation sweep.
+    /// `older_than`, **excluding** any version that is still the backing
+    /// version of a live `in_progress` multipart session (`expires_at >
+    /// now`). Used by the orphan-reconciliation sweep.
+    ///
+    /// A long-running multipart upload (big file, generous URL TTL) keeps its
+    /// backing version `pending` for the whole session, which can outlive
+    /// `orphan_grace_secs`; without this guard the sweep would delete the
+    /// version out from under the in-progress upload. A session whose
+    /// `expires_at` has *already* passed is deliberately NOT excluded here --
+    /// it is aborted by the next sweep step (`sweep_expired_multipart`), and
+    /// its version becomes reclaimable on a later sweep once the session row
+    /// itself transitions out of `in_progress`.
     ///
     /// @cpt-cf-file-storage-fr-orphan-reconciliation
     pub async fn list_pending_older_than<C: DBRunner>(
@@ -361,12 +375,23 @@ impl VersionRepo {
         conn: &C,
         scope: &AccessScope,
         older_than: OffsetDateTime,
+        now: OffsetDateTime,
     ) -> Result<Vec<FileVersion>, DomainError> {
         let rows = Entity::find()
             .filter(
                 Condition::all()
                     .add(Column::Status.eq(VersionStatus::Pending.as_str()))
-                    .add(Column::CreatedAt.lt(older_than)),
+                    .add(Column::CreatedAt.lt(older_than))
+                    .add(
+                        Column::VersionId.not_in_subquery(
+                            Query::select()
+                                .column(MultipartUploadColumn::VersionId)
+                                .from(MultipartUploadEntity)
+                                .and_where(MultipartUploadColumn::State.eq("in_progress"))
+                                .and_where(MultipartUploadColumn::ExpiresAt.gt(now))
+                                .to_owned(),
+                        ),
+                    ),
             )
             .order_by_asc(Column::CreatedAt)
             .secure()

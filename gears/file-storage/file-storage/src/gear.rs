@@ -48,6 +48,10 @@ pub struct FileStorageGear {
     service: OnceLock<Arc<FileService>>,
     multipart_service: OnceLock<Arc<MultipartService>>,
     policy_service: OnceLock<Arc<PolicyService>>,
+    /// P2 0.1 remaining: interim gear-local shared-secret credential for the
+    /// s2s finalize/report-part callback routes — see
+    /// `crate::api::rest::handlers::FinalizeAuth`.
+    finalize_auth: OnceLock<Arc<crate::api::rest::handlers::FinalizeAuth>>,
 }
 
 impl Default for FileStorageGear {
@@ -56,6 +60,7 @@ impl Default for FileStorageGear {
             service: OnceLock::new(),
             multipart_service: OnceLock::new(),
             policy_service: OnceLock::new(),
+            finalize_auth: OnceLock::new(),
         }
     }
 }
@@ -70,6 +75,20 @@ impl Gear for FileStorageGear {
             storage_root = %cfg.storage_root,
             "Loaded file-storage config"
         );
+
+        // P2 0.1 remaining: interim gear-local shared-secret credential for
+        // the s2s finalize/report-part callback routes (`None` preserves the
+        // pre-0.1 token-only trust model). `cfg.validate()` above already
+        // rejected an absent secret when `require_finalize_internal_secret`
+        // is set, so this is a plain construction.
+        let finalize_auth = Arc::new(crate::api::rest::handlers::FinalizeAuth::new(
+            cfg.finalize_internal_secret.clone(),
+        ));
+        self.finalize_auth
+            .set(Arc::clone(&finalize_auth))
+            .map_err(|_| {
+                anyhow::anyhow!("{} finalize auth already initialized", Self::MODULE_NAME)
+            })?;
 
         let db: Arc<DBProvider<DbError>> = Arc::new(ctx.db_required()?);
 
@@ -317,6 +336,11 @@ impl RestApiCapability for FileStorageGear {
             .get()
             .ok_or_else(|| anyhow::anyhow!("file-storage policy service not initialized"))?
             .clone();
+        let finalize_auth = self
+            .finalize_auth
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("file-storage finalize auth not initialized"))?
+            .clone();
         info!("Registering file-storage control-plane REST routes");
         Ok(routes::register_routes(
             router,
@@ -324,6 +348,7 @@ impl RestApiCapability for FileStorageGear {
             service,
             multipart_service,
             policy_service,
+            finalize_auth,
         ))
     }
 }
