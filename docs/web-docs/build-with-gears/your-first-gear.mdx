@@ -2,23 +2,15 @@
 title: Build your first gear
 description: A guided walkthrough of the real users-info gear — SDK, authorization, secure persistence, REST, and runtime wiring.
 sidebar:
-  label: Your first gear
-  order: 3
+  label: Build your first gear
+  order: 4
 ---
 
 import { Steps, Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
 
-This walkthrough follows the **real `users-info` example** in the framework repository
-(`examples/toolkit/users-info/`). It is a complete gear: an SDK, a domain service with
-authorization, secure multi-tenant persistence, a REST surface with OData, and runtime
-wiring. To keep it readable we trace the **User** entity end-to-end; City and Address
-follow the exact same shape in the example.
+This walkthrough follows the **real `users-info` example** in the framework repository (`examples/toolkit/users-info/`). It is a complete gear: an SDK, a domain service with authorization, secure multi-tenant persistence, a REST surface with OData, and runtime wiring. To keep it readable we trace the **User** entity end-to-end; City and Address follow the exact same shape in the example.
 
-<Aside type="caution" title="This is real, abridged code">
-Every snippet below is taken from the `users-info` crates, lightly abridged (marked
-`// …`) to keep the focus on the User path. The canonical, compiling source is the
-example itself — read it alongside this page.
-</Aside>
+<Aside type="caution" title="This is real, abridged code">Every snippet below is taken from the `users-info` crates, lightly abridged (marked `// …`) to keep the focus on the User path. The canonical, compiling source is the example itself — read it alongside this page.</Aside>
 
 ## Anatomy of a gear
 
@@ -417,10 +409,11 @@ decides whether `ClientHub` returns the local adapter or a gRPC client.
 ## Where to go next
 
 <CardGrid>
-  <LinkCard title="Authorization" href="../../guides/authorization/" description="The PolicyEnforcer → AccessScope flow in depth." />
-  <LinkCard title="Database patterns" href="../../guides/database/" description="SecureConn, Scopable, transactions, and migrations." />
-  <LinkCard title="Pagination & filtering" href="../../guides/odata/" description="OData $filter / $orderby / $select and cursor pages." />
-  <LinkCard title="Out-of-process gears" href="../../guides/out-of-process/" description="Expose the same SDK over gRPC, selected by config." />
+  <LinkCard title="Gear anatomy" href="../gear-anatomy/" description="The crate and layer structure, and which layer to change." />
+  <LinkCard title="Add authorization" href="../add-authorization/" description="The PolicyEnforcer → AccessScope flow in depth." />
+  <LinkCard title="Add a database" href="../add-a-database/" description="SecureConn, Scopable, transactions, and migrations." />
+  <LinkCard title="Add pagination and filtering" href="../add-pagination-odata/" description="OData $filter / $orderby / $select and cursor pages." />
+  <LinkCard title="Run a gear out-of-process" href="../out-of-process/" description="Expose the same SDK over gRPC, selected by config." />
 </CardGrid>
 
 The full `users-info` example adds City and Address entities, streaming sub-clients, and

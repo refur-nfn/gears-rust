@@ -1,9 +1,9 @@
 ---
-title: Contributor guide
+title: Documentation contribution
 description: Three ways to contribute to the Gears docs, the git workflow, local setup, and the writing style guide.
 sidebar:
-  label: Contributor guide
-  order: 2
+  label: Documentation contribution
+  order: 7
 ---
 
 Thank you for helping improve the Gears documentation. This site is built with

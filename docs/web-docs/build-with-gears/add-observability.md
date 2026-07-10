@@ -1,9 +1,9 @@
 ---
-title: Observability
+title: Add observability
 description: OpenTelemetry tracing, request IDs, health endpoints, and instrumented HTTP clients.
 sidebar:
-  label: Observability
-  order: 6
+  label: Add observability
+  order: 9
 ---
 
 Gears ship a common operational surface: distributed tracing, request-id propagation, health

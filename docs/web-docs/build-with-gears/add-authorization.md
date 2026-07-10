@@ -1,9 +1,9 @@
 ---
-title: Authorization
+title: Add authorization
 description: The PDP/PEP flow — PolicyEnforcer, AccessScope, constraint predicates, and route-level auth.
 sidebar:
-  label: Authorization
-  order: 3
+  label: Add authorization
+  order: 7
 ---
 
 Authentication happens at the edge (the API Gateway validates the token and injects a
@@ -126,5 +126,5 @@ DomainError::Forbidden =>
 ## See also
 
 - [Security & multi-tenancy](../../concepts/security-and-tenancy/) — the model behind this flow.
-- [Database patterns](../database/) — how the `AccessScope` becomes SQL.
+- [Add a database](../add-a-database/) — how the `AccessScope` becomes SQL.
 - Full code: `examples/toolkit/users-info/users-info/src/domain/service/`.

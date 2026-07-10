@@ -1,9 +1,9 @@
 ---
-title: Pagination & filtering (OData)
+title: Add pagination and filtering (OData)
 description: OData $filter / $orderby / $select and cursor-based pagination for list endpoints.
 sidebar:
-  label: Pagination & OData
-  order: 4
+  label: Add pagination and filtering
+  order: 8
 ---
 
 List endpoints in Gears speak a typed subset of OData — `$filter`, `$orderby`, `$select` —
@@ -101,5 +101,5 @@ then projected. Keep that in mind for very wide rows.
 
 ## See also
 
-- [Database patterns](../database/) — the scoped base query `paginate_odata` runs over.
+- [Add a database](../add-a-database/) — the scoped base query `paginate_odata` runs over.
 - Full code: the `odata/` module in `users-info-sdk` and `odata_mapper.rs` in the gear.

@@ -1,9 +1,9 @@
 ---
-title: Out-of-process gears (gRPC)
+title: Run a gear out-of-process
 description: Run a gear as a separate gRPC service behind the same SDK trait, selected by configuration.
 sidebar:
-  label: Out-of-process (gRPC)
-  order: 5
+  label: Run a gear out-of-process
+  order: 10
 ---
 
 A gear can run **in the host process** (resolved through `ClientHub` as a direct call) or

@@ -2,8 +2,8 @@
 title: Runtime & lifecycle
 description: Capabilities, the ordered lifecycle the runtime drives every gear through, async boundaries, and the cluster plane.
 sidebar:
-  label: Runtime & lifecycle
-  order: 3
+  label: Runtime and lifecycle
+  order: 4
 ---
 
 ## Capabilities

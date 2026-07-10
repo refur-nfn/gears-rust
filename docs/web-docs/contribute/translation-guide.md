@@ -3,7 +3,7 @@ title: Translation guide
 description: How localization works on the Gears docs — locales, the per-language directory convention, and the Lunaria status dashboard.
 sidebar:
   label: Translation guide
-  order: 3
+  order: 8
 ---
 
 The Gears docs are localizable. Translations live alongside the English source,
@@ -79,7 +79,7 @@ them.
    - code blocks and command output,
    - internal link targets (the path stays the same).
 4. Run `pnpm dev` and visit the localized URL (e.g. `/ru/concepts/runtime-and-lifecycle/`).
-5. Open a pull request following the [contributor guide](../contributor-guide/).
+5. Open a pull request following the [documentation contribution guide](../documentation/).
 
 :::tip
 Prioritize quality over volume. A small set of accurate, well-reviewed pages is

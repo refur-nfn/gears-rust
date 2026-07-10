@@ -1,9 +1,9 @@
 ---
-title: Database patterns
+title: Add a database
 description: Secure, tenant-scoped persistence with SecureConn, Scopable entities, transactions, and migrations.
 sidebar:
-  label: Database
-  order: 2
+  label: Add a database
+  order: 6
 ---
 
 Gears never touch a raw database connection. All access flows through the secure ORM layer
@@ -70,7 +70,7 @@ async fn delete<C: DBRunner>(&self, conn: &C, scope: &AccessScope, id: Uuid)
 ```
 
 The scope is obtained from the `PolicyEnforcer` in the domain service and passed down — see
-[Authorization](../authorization/). An empty scope matches **no rows**
+[Authorization](../add-authorization/). An empty scope matches **no rows**
 (deny-by-default), and `tenant_id` is immutable on update.
 
 ## Acquire a connection
@@ -135,6 +135,6 @@ backend-aware SQL via `manager.get_connection().execute_unprepared(...)`).
 ## See also
 
 - [Security & multi-tenancy](../../concepts/security-and-tenancy/) — where the scope comes from.
-- [Authorization](../authorization/) — obtaining an `AccessScope`.
-- [Pagination & filtering](../odata/) — `paginate_odata` over a scoped query.
+- [Add authorization](../add-authorization/) — obtaining an `AccessScope`.
+- [Add pagination and filtering](../add-pagination-odata/) — `paginate_odata` over a scoped query.
 - Full code: `examples/toolkit/users-info/users-info/src/infra/storage/`.
