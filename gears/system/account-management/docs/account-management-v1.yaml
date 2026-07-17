@@ -891,10 +891,16 @@ components:
           type: integer
           minimum: 0
           description: |
-            Number of direct children visible to the caller, resolved at
-            read time. Scope-filtered (direct children behind a
-            self-managed barrier the caller cannot penetrate are not
-            counted); excludes AM-internal `provisioning` rows; includes
+            Number of direct children of this tenant, resolved at read
+            time. Gated on the PARENT: when this tenant is reachable
+            under the caller's barrier-respecting scope, ALL of its
+            direct children are counted — including `self_managed` ones,
+            mirroring the direct-child carve-out of the `/children`
+            listing (the counter and the listing always agree). For a
+            tenant the caller can see only through that identity-level
+            carve-out (i.e. a `self_managed` tenant past its own
+            barrier), the count is `0` — nothing below a barrier leaks.
+            Excludes AM-internal `provisioning` rows; includes
             soft-`deleted` children. `0` for a leaf. Derived field — not
             available in `$filter` / `$orderby`.
         created_at:

@@ -11,7 +11,9 @@ use account_management_sdk::TenantInfoFilterField;
 use bigdecimal::BigDecimal;
 use gts::GtsId;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, FromQueryResult, Order, QuerySelect};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, FromQueryResult, Order, QuerySelect, QueryTrait,
+};
 use serde_json::Value;
 use toolkit_db::odata::sea_orm_filter::{
     FieldToColumn, LimitCfg, ODataFieldMapping, PaginateOdataTryError, paginate_odata_try,
@@ -455,18 +457,30 @@ pub(super) async fn count_children(
 /// different from [`count_children`], which is an internal
 /// delete-saga guard (`allow_all`, always counts `Provisioning`):
 ///
-/// * **Scope-filtered** — bounded by the caller's `scope` through
-///   `SecureORM`, so direct children behind a self-managed barrier the
-///   caller cannot penetrate collapse to `0`. This matches the
-///   visibility rule the rest of the public read surface obeys.
+/// * **Gated on the PARENT's Respect-reachability, then counts every
+///   direct child** — including a `self_managed` direct child. This is
+///   the direct-child carve-out (see `service::scope_util`): a
+///   `self_managed` tenant sits behind a `barrier = 1` closure edge
+///   even from its own parent, so clamping each *child* by the caller's
+///   barrier-respecting scope would silently drop a Respect-reachable
+///   parent's `self_managed` direct child from its `child_count` (while
+///   `list_children` still shows it — the two must agree). Instead we
+///   check which requested parents the caller can Respect-reach, then
+///   count all their direct children. The `parent_id` predicate keeps
+///   the count strictly depth-1, so nothing below a barrier leaks: a
+///   parent the caller can only reach via the identity-level carve-out
+///   (i.e. a `self_managed` tenant past the barrier) is NOT
+///   Respect-reachable, so its subtree count collapses to `0`.
 /// * **`Provisioning` excluded** — those rows have no public
 ///   representation anywhere on the SDK boundary. `Deleted` rows are
 ///   *included*, mirroring that they stay reachable via
 ///   `$filter=status eq 'deleted'`.
 ///
-/// One grouped `COUNT ... GROUP BY parent_id` for the whole batch — no
-/// N+1 across the page. Parents with no matching child are absent from
-/// the returned map; callers default those to `0`.
+/// One indexed statement for the whole batch (the Respect-scoped parent
+/// gate rides as a subquery inside the grouped
+/// `COUNT ... GROUP BY parent_id`) — no N+1 across the page. Parents
+/// with no matching child are absent from the returned map; callers
+/// default those to `0`.
 pub(super) async fn count_children_grouped(
     repo: &TenantRepoImpl,
     scope: &AccessScope,
@@ -483,12 +497,40 @@ pub(super) async fn count_children_grouped(
     }
     let connection = repo.db.conn()?;
 
-    let rows = tenants::Entity::find()
+    // The access-control boundary: of the requested parents, which can
+    // the caller Respect-reach? Only children of parents the caller can
+    // genuinely see are counted. A parent reachable to the caller only
+    // via the identity-level direct-child carve-out (a self_managed
+    // tenant past its barrier) is absent from this Respect-scoped set,
+    // so its children are never counted.
+    //
+    // Composed as a SUBQUERY of the count statement (not a separate
+    // read): the gate and the count must observe one database snapshot,
+    // otherwise a parent concurrently reparented or flipped behind a
+    // barrier between two statements could contribute a count the
+    // caller has just lost access to.
+    let reachable_parents = tenants::Entity::find()
         .secure()
         .scope_with(scope)
+        .filter(Condition::all().add(tenants::Column::Id.is_in(parent_ids.iter().copied())))
+        .into_inner()
+        .select_only()
+        .column(tenants::Column::Id)
+        .into_query();
+
+    // Count every direct child of each Respect-reachable parent,
+    // INCLUDING self_managed direct children. The parent subquery above
+    // is the access boundary and the `parent_id` predicate pins this to
+    // depth 1, so the outer count runs unclamped (`allow_all`) rather
+    // than re-applying the caller's barrier=0 subtree clamp — which
+    // would otherwise drop a self_managed direct child of a reachable
+    // parent. `Provisioning` is excluded; `Deleted` is included.
+    let rows = tenants::Entity::find()
+        .secure()
+        .scope_with(&AccessScope::allow_all())
         .filter(
             Condition::all()
-                .add(tenants::Column::ParentId.is_in(parent_ids.iter().copied()))
+                .add(tenants::Column::ParentId.in_subquery(reachable_parents))
                 .add(tenants::Column::Status.ne(TenantStatus::Provisioning.as_smallint())),
         )
         .project_all(&connection, |q| {
