@@ -4,7 +4,7 @@ on:
   push:
 jobs:
   code-ranker:
-    uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@v1
+    uses: code-ranker-com/actions/.github/workflows/report.yml@v1
     permissions:
       id-token: write
       contents: read
