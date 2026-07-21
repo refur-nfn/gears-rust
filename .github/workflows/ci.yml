@@ -68,6 +68,7 @@ jobs:
               - 'rust-toolchain.toml'
               - '.cargo/**'
             fips:
+              - 'libs/toolkit/**'
               - 'libs/toolkit-http/**'
               - 'libs/rustls-*/**'
             dylint:
