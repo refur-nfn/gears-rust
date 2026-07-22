@@ -165,7 +165,7 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
-          tool-cache: false
+          tool-cache: true
           android: true
           dotnet: true
           haskell: true
@@ -189,6 +189,9 @@ jobs:
 
       - name: cargo test (workspace)
         run: make test-no-macros
+
+      - name: Clean build artifacts
+        run: rm -rf target
 
       - name: Clear cargo registry index (workaround gix slotmap overflow)
         run: rm -rf ~/.cargo/registry/index
