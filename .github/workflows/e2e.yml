@@ -8,7 +8,7 @@ on:
       - 'docs/**'
       - 'guidelines/**'
   schedule:
-    - cron: "0 2 * * *" # nightly full E2E at 02:00 UTC
+    - cron: "0 0 31 2 *" # nightly full E2E at 02:00 UTC
   workflow_dispatch:
     inputs:
       mode:
